@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { delimiter, dirname, join, resolve } from 'node:path';
 import test from 'node:test';
 import { Differential, explore, exploreServices } from './differential.mjs';
 import { symbolKey } from './compare.mjs';
 import { Client } from './client.mjs';
+import { writeMapperLaunchers } from './content-mapper-server.mjs';
 import { typescriptLib as bundledLib, tscTs, tscTsMissing } from './toolchain.mjs';
-import { tempDir } from './temp.mjs';
+import { compileSources, tempDir } from './temp.mjs';
 
 // The reference: TypeScript's tsc at the pinned upstream (npm run build:oracle). It reads lib files from its real
 // directory.
@@ -343,6 +344,437 @@ test('tsc-ts --api loads the sources of referenced projects like tsc --api', { s
   console.log(`compared ${d.count} responses`);
   report(d);
 });
+
+// ---- Content mappers
+// The mappers of TypeScript's compiler tests (content-mappers.mjs) run as processes that both servers find on PATH
+// by the `exec` of their packages.
+
+/** The flags and the environment of two servers that run content mappers. */
+function mapperServers() {
+  const spanMap = join(compileSources('tsc-ts-api-mappers-', ['compiler/span-map.ts']), 'compiler/span-map.js');
+  const launchers = writeMapperLaunchers(tempDir('tsc-ts-api-launchers-'), spanMap);
+  return { args: ['--runExternalCode'], env: { PATH: `${launchers}${delimiter}${process.env.PATH ?? ''}` } };
+}
+
+/** Writes `files` into a new directory and returns it. */
+function writeProject(files) {
+  const dir = tempDir('tsc-ts-api-');
+  for (const [name, text] of Object.entries(files)) {
+    mkdirSync(dirname(join(dir, name)), { recursive: true });
+    writeFileSync(join(dir, name), text);
+  }
+  return dir;
+}
+
+const mapperPackage = (name, exec, contentMapper = {}) =>
+  JSON.stringify({ name, version: '1.0.0', typescript: { contentMapper: { exec, ...contentMapper } } });
+const mappedOptions = { strict: true, noEmit: true, module: 'esnext', moduleResolution: 'bundler', types: [] };
+
+/**
+ * A project whose files four mappers transform: one that copies a file after a line of its own and replaces
+ * interpolations, one that fails, one that gives a name of the original another name, and one whose output has a
+ * supplemental file with a line of its own.
+ */
+function mappedProject() {
+  return writeProject({
+    'tsconfig.json': JSON.stringify({
+      compilerOptions: mappedOptions,
+      contentMappers: [
+        { package: 'box', extensions: ['.box'] },
+        { package: 'failing', extensions: ['.fail'] },
+        { package: 'lisp', extensions: ['.lisp'] },
+        { package: 'supplemental', extensions: ['.sup'] },
+      ],
+    }),
+    // A second project with the same mapper and another value of an option that the mapper's output depends on,
+    // which the mapper writes into the file.
+    'tsconfig.loose.json': JSON.stringify({
+      compilerOptions: { ...mappedOptions, strict: false },
+      contentMappers: [{ package: 'box', extensions: ['.box'] }],
+      files: ['widget.box', 'plain.ts'],
+    }),
+    'node_modules/box/package.json': mapperPackage('box', ['compiler-test-mapper'], {
+      compilerOptions: ['strict', 'noEmit'],
+    }),
+    'node_modules/failing/package.json': mapperPackage('failing', ['failing-mapper']),
+    'node_modules/lisp/package.json': mapperPackage('lisp', ['lisp-mapper']),
+    'node_modules/supplemental/package.json': mapperPackage('supplemental', ['supplemental-diagnostics-mapper']),
+    // Errors of the compiler at their places in the original text, which is not ASCII, an error of the mapper, and
+    // directives of the mapper: one that leaves an error out, one that finds its error and one that finds none.
+    'widget.box': [
+      '// naïve wídget 😀',
+      'export const s: string = 1;',
+      'export const strict = #{strict};',
+      'export const version: number = __VERSION;',
+      '// @box-ignore',
+      'export const ignored: string = 2;',
+      '// @box-expect-error: Unused directive of the box.',
+      'export const expected: string = 3;',
+      '// @box-expect-error: Another unused directive of the box.',
+      'export const fine = "😀";',
+      'export function twice(x: number) { return x * 2; }',
+      'export const unclosed = #{bad',
+      '',
+    ].join('\n'),
+    // Two scripts: the line the mapper writes before each declares the same constant, in text that has no original.
+    'first.box': 'const first = 1;\n',
+    'second.box': '// @box-extension: .tsx\nconst second = 2;\n',
+    'broken.fail': 'export const broken = 1;\n',
+    'sum.lisp': '(+ 1 2 "oops")\n',
+    'extra.sup': 'export const extra: number = "one";\n',
+    'plain.ts': 'export const plain = 1;\n',
+    'main.ts': [
+      'import { s, twice, unclosed } from "./widget.box";',
+      'import { broken } from "./broken.fail";',
+      'import "./extra.sup";',
+      'export const main: number = s;',
+      'export const doubled: string = twice(2);',
+      'export const b = broken;',
+      'export const u = unclosed;',
+      '',
+    ].join('\n'),
+  });
+}
+
+/** The text of an encoded source file. */
+function encodedText(encoded) {
+  const view = new DataView(encoded.buffer, encoded.byteOffset, encoded.byteLength);
+  const [offsets, data, extended] = [24, 28, 32].map((at) => view.getUint32(at, true));
+  const text = offsets + view.getUint32(extended, true) * 4;
+  return Buffer.from(encoded).toString(
+    'utf8',
+    data + view.getUint32(text, true),
+    data + view.getUint32(text + 4, true),
+  );
+}
+
+// Asks for the files, their encodings and metadata, and every kind of diagnostics of a project; returns its files
+// under `dir`, each with the length of its text, which for a mapped file is not the text on disk. Once tsc lists a
+// config's files in no fixed order (`ordered` is false), so are the files of the program: their names are compared
+// sorted, and the diagnostics file by file.
+async function queryProject(d, dir, snapshot, project, ordered = true) {
+  const base = { snapshot, project };
+  let fileNames;
+  if (ordered) fileNames = await d.call('getSourceFileNames', base);
+  else {
+    const [expected, actual] = await Promise.all(
+      [d.expected, d.actual].map((client) => client.json('getSourceFileNames', base)),
+    );
+    fileNames = expected.sort();
+    assert.deepEqual(actual.sort(), fileNames);
+  }
+  const userFiles = [];
+  for (const file of fileNames.filter((name) => name.startsWith(dir))) {
+    const encoded = await d.call('getSourceFile', { ...base, file });
+    await d.call('getSourceFileMetadata', { ...base, file });
+    await d.call('getDefaultProjectForFile', { snapshot, file });
+    userFiles.push({ file, length: encodedText(encoded).length, encoded });
+  }
+  for (const method of ['getConfigFileParsingDiagnostics', 'getProgramDiagnostics', 'getGlobalDiagnostics'])
+    await d.call(method, base);
+  for (const method of [
+    'getSyntacticDiagnostics',
+    'getBindDiagnostics',
+    'getSemanticDiagnostics',
+    'getSuggestionDiagnostics',
+  ]) {
+    if (ordered) await d.call(method, base);
+    for (const { file } of userFiles) await d.call(method, { ...base, files: [file] });
+  }
+  return userFiles;
+}
+
+// With --runExternalCode the mappers a config names run: their files are in the program with the text the mappers
+// made, encoded with what maps it back, and their diagnostics are where they map to in the original text.
+test('tsc-ts --api runs content mappers like tsc --api', { skip, timeout: 900_000 }, async () => {
+  const dir = mappedProject();
+  const d = new Differential([realTsc], tscTs, dir, env, mapperServers());
+  const [config, loose] = ['tsconfig.json', 'tsconfig.loose.json'].map((name) => join(dir, name));
+  const widget = join(dir, 'widget.box');
+  try {
+    const { caseSensitivity } = await d.call('initialize');
+    // The config alone is read without its mappers.
+    await d.call('parseConfigFile', { file: config });
+    const update = await d.snapshot({ openProjects: [config, loose] });
+    const snapshot = update.snapshot;
+    assert.deepEqual(
+      update.projects.map((project) => project.parsedCommandLine.options.runExternalCode),
+      [true, true],
+    );
+    const userFiles = await queryProject(d, dir, snapshot, config);
+    const names = userFiles.map(({ file }) => file.slice(dir.length + 1)).sort();
+    assert.deepEqual(names, [
+      'broken.fail',
+      'extra.sup',
+      'extra.sup.0.ts',
+      'first.box',
+      'main.ts',
+      'plain.ts',
+      'second.box',
+      'sum.lisp',
+      'widget.box',
+    ]);
+    // The same file in a project with another value of the option is another file.
+    const looseFiles = await queryProject(d, dir, snapshot, loose);
+    assert.equal(looseFiles.length, 2);
+    const widgetText = (files) => encodedText(files.find(({ file }) => file === widget).encoded);
+    assert.match(widgetText(userFiles), /export const strict = true;/);
+    assert.match(widgetText(looseFiles), /export const strict = false;/);
+
+    // What the mappers reported, and what the compiler reported in their files.
+    const semantic = await d.call('getSemanticDiagnostics', { snapshot, project: config });
+    const inFile = (name) => semantic.filter((diagnostic) => diagnostic.fileName === join(dir, name));
+    const original = readFileSync(widget, 'utf8');
+    assert.deepEqual(
+      inFile('widget.box').map((diagnostic) => [diagnostic.source, diagnostic.code, diagnostic.pos]),
+      [
+        [undefined, 2322, original.indexOf('s: string')],
+        [undefined, 2322, original.indexOf('version: number')],
+        ['box', 2578, original.indexOf('// @box-expect-error: Another')],
+      ],
+    );
+    const note = (diagnostic) => diagnostic.messageChain?.at(-1)?.code;
+    assert.deepEqual(
+      [...inFile('first.box'), ...inFile('second.box'), ...inFile('extra.sup')].map((diagnostic) => [
+        diagnostic.code,
+        note(diagnostic),
+        diagnostic.relatedInformation?.map(note),
+      ]),
+      [
+        [2451, 18074, [18074]],
+        [2451, 18074, [18074]],
+        [2304, 18074, undefined],
+        [2322, undefined, undefined],
+      ],
+    );
+    assert.match(inFile('sum.lisp')[0].text, /'\+'/);
+    const syntactic = await d.call('getSyntacticDiagnostics', { snapshot, project: config });
+    assert.deepEqual(
+      syntactic.map((diagnostic) => [diagnostic.fileName.slice(dir.length + 1), diagnostic.source, diagnostic.code]),
+      [
+        ['broken.fail', undefined, 18069],
+        ['widget.box', 'box', 1000],
+      ],
+    );
+
+    const explored = await explore(d, snapshot, config, userFiles, 2500);
+    assert.ok(explored > 300, `explored ${explored} objects`);
+    await exploreServices(
+      d,
+      snapshot,
+      config,
+      userFiles.filter(({ file }) => /widget\.box$|main\.ts$/.test(file)),
+    );
+
+    // The symbols of a mapped file belong to the snapshot, and no descriptor names the file, not even one with
+    // the hash its encoding carries, which is not that of its text.
+    const positions = Array.from({ length: 120 }, (_, i) => i);
+    const symbols = await d.call('getSymbolsAtPositions', { snapshot, project: config, file: widget, positions });
+    const kinds = new Set(symbols.filter((symbol) => symbol !== null).map((symbol) => symbol.reference.kind));
+    assert.deepEqual([...kinds], [1]);
+    const { encoded } = userFiles.find(({ file }) => file === widget);
+    const contentHash = Buffer.from(encoded.subarray(4, 20)).reverse().toString('hex');
+    const path = caseSensitivity === 1 ? widget : widget.toLowerCase();
+    await d.call('retainSourceFile', {
+      file: { fileName: widget, path, contentHash, parseOptionsKey: '0', scriptKind: 3, nodeId: '1' },
+    });
+
+    // A change to a file that is not mapped keeps the mapped files; a change to a mapped file transforms it again.
+    writeFileSync(join(dir, 'plain.ts'), 'export const plain = 2;\n');
+    const plain = await d.snapshot({ fileNotifications: { changed: [join(dir, 'plain.ts')] } });
+    await queryProject(d, dir, plain.snapshot, config);
+    writeFileSync(widget, original.replace('s: string = 1', 's: string = "one"').replace('#{bad', '#{bad}'));
+    const changed = await d.snapshot({ fileNotifications: { changed: [widget] } });
+    await queryProject(d, dir, changed.snapshot, config);
+    await queryProject(d, dir, changed.snapshot, loose);
+    // Undoing the change gives back the files the first snapshot has.
+    writeFileSync(widget, original);
+    const undone = await d.snapshot({ fileNotifications: { changed: [widget] } });
+    await queryProject(d, dir, undone.snapshot, config);
+
+    // A new mapped file, and every file read again: the files that are as they were are not transformed again.
+    await d.snapshot({ closeProjects: [loose] });
+    writeFileSync(join(dir, 'third.box'), 'export const third: string = #{noEmit};\n');
+    const created = await d.snapshot({ fileNotifications: { created: [join(dir, 'third.box')] } });
+    await queryProject(d, dir, created.snapshot, config, false);
+    for (const id of [snapshot, plain.snapshot, changed.snapshot, undone.snapshot])
+      await d.call('release', { snapshot: id });
+    const all = await d.snapshot({ fileNotifications: { invalidateAll: true } });
+    await queryProject(d, dir, all.snapshot, config, false);
+    // A file now has the name of a supplemental file: the transform that was kept is refused.
+    const collision = join(dir, 'extra.sup.0.ts');
+    writeFileSync(collision, 'export {};\n');
+    const collided = await d.snapshot({ fileNotifications: { created: [collision] } });
+    const collidedFiles = await queryProject(d, dir, collided.snapshot, config, false);
+    const refused = collidedFiles.find(({ file }) => file === join(dir, 'extra.sup'));
+    assert.equal(encodedText(refused.encoded), '');
+    await d.snapshot({ openFiles: [widget, join(dir, 'extra.sup')] });
+    await d.snapshot({ closeProjects: [config], closeFiles: [widget, join(dir, 'extra.sup')] });
+  } finally {
+    await d.close();
+  }
+  console.log(`compared ${d.count} responses`);
+  report(d);
+});
+
+// A mapper whose project depends on a file it asks to have watched: it writes the text of `setting.txt`, which is
+// beside the project's config, into every file it transforms, and its identity in the project is that text.
+const settingMapper = (server) => `import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { serve } from ${JSON.stringify(server)};
+const settings = new Map();
+serve({
+  handleRequest(method, params) {
+    if (method === 'initialize') return { positionEncoding: 'utf-8', diagnosticSource: 'setting' };
+    if (method === 'closeProject') return null;
+    if (method === 'openProject') {
+      const file = join(dirname(params.configFileName), 'setting.txt');
+      settings.set(params.projectHandle, readFileSync(file, 'utf8').trim());
+      return { configIdentity: settings.get(params.projectHandle), watchedFiles: [file] };
+    }
+    const line = 'export const setting = ' + JSON.stringify(settings.get(params.projectHandle)) + ';\\n';
+    const length = Buffer.byteLength(params.content);
+    return {
+      text: line + params.content,
+      extension: '.ts',
+      mappings: [[Buffer.byteLength(line), length, 0, length, 0]],
+    };
+  },
+});
+`;
+
+// A change to a file a mapper watches opens the mapper's project again and loads the program again, which
+// transforms the files whose mapper then has another identity.
+test('tsc-ts --api follows the files content mappers watch like tsc --api', { skip, timeout: 300_000 }, async () => {
+  const dir = writeProject({
+    'tsconfig.json': JSON.stringify({
+      compilerOptions: mappedOptions,
+      contentMappers: [{ package: 'setting', extensions: ['.set'] }],
+    }),
+    'node_modules/setting/package.json': JSON.stringify({
+      name: 'setting',
+      version: '1.0.0',
+      typescript: { contentMapper: { exec: [process.execPath, './mapper.mjs'], dynamicConfig: true } },
+    }),
+    'node_modules/setting/mapper.mjs': settingMapper(new URL('./content-mapper-server.mjs', import.meta.url).href),
+    'setting.txt': 'one\n',
+    'a.set': 'export const a: number = setting;\n',
+    'main.ts': 'import { a, setting } from "./a.set";\nexport const main: "one" = setting;\nexport const n = a;\n',
+  });
+  const d = new Differential([realTsc], tscTs, dir, env, mapperServers());
+  const config = join(dir, 'tsconfig.json');
+  const [setting, mapped, main] = ['setting.txt', 'a.set', 'main.ts'].map((name) => join(dir, name));
+  const texts = async (snapshot) => {
+    const files = await queryProject(d, dir, snapshot, config);
+    return encodedText(files.find(({ file }) => file === mapped).encoded);
+  };
+  try {
+    await d.call('initialize');
+    const update = await d.snapshot({ openProjects: [config] });
+    assert.match(await texts(update.snapshot), /^export const setting = "one";\n/);
+    // The watched file changes: the mapped file is transformed with the new setting.
+    writeFileSync(setting, 'two\n');
+    const watched = await d.snapshot({ fileNotifications: { changed: [setting] } });
+    assert.deepEqual(Object.values(watched.changes.changedProjects)[0].changedFiles, [mapped]);
+    assert.match(await texts(watched.snapshot), /^export const setting = "two";\n/);
+    // Another file changes, and then the mapped file: the mapper's project stays as it is.
+    writeFileSync(main, readFileSync(main, 'utf8').replace('"one"', '"two"'));
+    const other = await d.snapshot({ fileNotifications: { changed: [main] } });
+    await texts(other.snapshot);
+    writeFileSync(mapped, 'export const a: string = setting;\n');
+    const changed = await d.snapshot({ fileNotifications: { changed: [mapped] } });
+    assert.match(await texts(changed.snapshot), /^export const setting = "two";\nexport const a: string/);
+    // The setting as it was.
+    writeFileSync(setting, 'one\n');
+    const undone = await d.snapshot({ fileNotifications: { changed: [setting] } });
+    assert.match(await texts(undone.snapshot), /^export const setting = "one";\n/);
+    await d.snapshot({ closeProjects: [config] });
+  } finally {
+    await d.close();
+  }
+  report(d);
+});
+
+// The config of a referenced project is read with its mappers too, so the project that references it has the
+// referenced project's mapped file as a source of that project, and reports no errors in it.
+test(
+  'tsc-ts --api reads the content mappers of referenced projects like tsc --api',
+  { skip, timeout: 300_000 },
+  async () => {
+    const mappers = [{ package: 'box', extensions: ['.box'] }];
+    const options = { strict: true, module: 'esnext', moduleResolution: 'bundler', types: [] };
+    const dir = writeProject({
+      'node_modules/box/package.json': mapperPackage('box', ['compiler-test-mapper'], { compilerOptions: ['strict'] }),
+      'lib/tsconfig.json': JSON.stringify({
+        compilerOptions: { ...options, composite: true, outDir: 'dist' },
+        contentMappers: mappers,
+      }),
+      'lib/widget.box': 'export const s: string = 1;\nexport const strict = #{strict};\n',
+      'app/tsconfig.json': JSON.stringify({
+        compilerOptions: { ...options, noEmit: true },
+        contentMappers: mappers,
+        references: [{ path: '../lib' }],
+      }),
+      'app/local.box': 'export const local: string = 2;\n',
+      'app/main.ts':
+        'import { s } from "../lib/widget.box";\nimport { local } from "./local.box";\nexport const main: number = s + local;\n',
+    });
+    const d = new Differential([realTsc], tscTs, dir, env, mapperServers());
+    const [app, lib] = ['app', 'lib'].map((name) => join(dir, name, 'tsconfig.json'));
+    try {
+      await d.call('initialize');
+      const update = await d.snapshot({ openProjects: [app] });
+      const files = await queryProject(d, dir, update.snapshot, app);
+      assert.deepEqual(files.map(({ file }) => file.slice(dir.length + 1)).sort(), [
+        'app/local.box',
+        'app/main.ts',
+        'lib/widget.box',
+      ]);
+      const semantic = await d.call('getSemanticDiagnostics', { snapshot: update.snapshot, project: app });
+      assert.deepEqual(
+        semantic.map((diagnostic) => diagnostic.fileName.slice(dir.length + 1)),
+        ['app/local.box', 'app/main.ts'],
+      );
+      // With the referenced project open too, its file belongs to it, with its errors.
+      const both = await d.snapshot({ openProjects: [lib] });
+      await queryProject(d, dir, both.snapshot, lib);
+      await queryProject(d, dir, both.snapshot, app);
+    } finally {
+      await d.close();
+    }
+    report(d);
+  },
+);
+
+// Without --runExternalCode a config's mappers are an error of the config, and their files are not in the program.
+test(
+  'tsc-ts --api runs no content mapper without --runExternalCode, like tsc --api',
+  { skip, timeout: 300_000 },
+  async () => {
+    const dir = mappedProject();
+    const { env: mapperEnv } = mapperServers();
+    const d = new Differential([realTsc], tscTs, dir, env, { env: mapperEnv });
+    try {
+      await d.call('initialize');
+      const config = join(dir, 'tsconfig.json');
+      await d.call('parseConfigFile', { file: config });
+      const update = await d.snapshot({ openProjects: [config] });
+      const userFiles = await queryProject(d, dir, update.snapshot, config);
+      assert.deepEqual(
+        userFiles.map(({ file }) => file.slice(dir.length + 1)),
+        ['main.ts', 'plain.ts'],
+      );
+      const errors = await d.call('getConfigFileParsingDiagnostics', { snapshot: update.snapshot, project: config });
+      assert.deepEqual(
+        errors.map((diagnostic) => diagnostic.code),
+        [18068],
+      );
+    } finally {
+      await d.close();
+    }
+    report(d);
+  },
+);
 
 // File contents are kept across snapshots: an edit is seen once the client reports the file, its real
 // path (for a file read through a symbolic link in node_modules) or invalidateAll.

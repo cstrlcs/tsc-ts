@@ -2,9 +2,15 @@
 // writes tsgo's binary AST encoding of it, a tree dump in encoder order (--tree), or
 // timings (--bench, --bench-encode).
 //
-// Usage: encode-oracle FILE [--tree|--bench|--bench-encode] [--jsx] [--force]
+// Usage: encode-oracle FILE [--tree|--bench|--bench-encode] [--jsx] [--force] [--mapped=RESPONSE] [--supplemental=INDEX]
 //
 // The file is parsed as "/" + its base name, so output doesn't depend on its location.
+//
+// With --mapped, FILE is a file that a content mapper transforms, and RESPONSE holds the
+// mapper's response to its "transform" request as JSON, with positions in UTF-8. What is
+// encoded or dumped is the file the response is parsed into under the name of FILE, or
+// with --supplemental the supplemental file at that index, as the mapper "mapper@1.0.0"
+// with the diagnostic source "mapper" and the transform identity "identity" produces it.
 package main
 
 import (
@@ -12,15 +18,23 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
+	_ "unsafe"
 
 	"github.com/microsoft/TypeScript/tsc/internal/api/encoder"
 	"github.com/microsoft/TypeScript/tsc/internal/ast"
+	"github.com/microsoft/TypeScript/tsc/internal/contentmapper"
 	"github.com/microsoft/TypeScript/tsc/internal/core"
+	"github.com/microsoft/TypeScript/tsc/internal/json"
 	"github.com/microsoft/TypeScript/tsc/internal/parser"
 	"github.com/microsoft/TypeScript/tsc/internal/tspath"
 	"github.com/zeebo/xxh3"
 )
+
+//go:linkname decodeTransformResult github.com/microsoft/TypeScript/tsc/internal/contentmapper.decodeTransformResult
+func decodeTransformResult(raw json.Value, originalText string, positionEncoding contentmapper.PositionEncoding, diagnosticSource string) (contentmapper.Result, error)
 
 func parse(fileName string, text string, jsx bool, force bool) *ast.SourceFile {
 	opts := ast.SourceFileParseOptions{FileName: tspath.RootedFilePath(fileName), PathKey: tspath.PathKey(fileName)}
@@ -39,6 +53,33 @@ func parse(fileName string, text string, jsx bool, force bool) *ast.SourceFile {
 	return file
 }
 
+// parseMapped parses a content mapper's response to the transform of the file: the canonical
+// file, or the supplemental file at index supplemental if that is not negative. The file's
+// hash is that of its own text.
+func parseMapped(fileName string, text string, response []byte, supplemental int, jsx bool, force bool) *ast.SourceFile {
+	result, err := decodeTransformResult(json.Value(response), text, contentmapper.PositionEncodingUTF8, "mapper")
+	if err != nil {
+		panic(err)
+	}
+	mapper := &contentmapper.Mapper{
+		Definition: contentmapper.Definition{Package: "mapper"},
+		Manifest:   contentmapper.Manifest{Name: "mapper", Version: "1.0.0"},
+	}
+	opts := ast.SourceFileParseOptions{FileName: tspath.RootedFilePath(fileName), PathKey: tspath.PathKey(fileName)}
+	opts.ExternalModuleIndicatorOptions.JSX = jsx
+	opts.ExternalModuleIndicatorOptions.Force = force
+	files, err := contentmapper.ParseResult(opts, text, mapper, "identity", result)
+	if err != nil {
+		panic(err)
+	}
+	file := files.Canonical
+	if supplemental >= 0 {
+		file = files.Supplemental[supplemental]
+	}
+	file.Hash = xxh3.HashString128(file.Text())
+	return file
+}
+
 func main() {
 	data, err := os.ReadFile(os.Args[1])
 	if err != nil {
@@ -48,15 +89,33 @@ func main() {
 	fileName := "/" + filepath.Base(os.Args[1])
 	mode := ""
 	jsx, force := false, false
+	mapped, supplemental := "", -1
 	for _, arg := range os.Args[2:] {
-		switch arg {
-		case "--jsx":
+		switch {
+		case arg == "--jsx":
 			jsx = true
-		case "--force":
+		case arg == "--force":
 			force = true
+		case strings.HasPrefix(arg, "--mapped="):
+			mapped = strings.TrimPrefix(arg, "--mapped=")
+		case strings.HasPrefix(arg, "--supplemental="):
+			supplemental, err = strconv.Atoi(strings.TrimPrefix(arg, "--supplemental="))
+			if err != nil {
+				panic(err)
+			}
 		default:
 			mode = arg
 		}
+	}
+	load := func() *ast.SourceFile {
+		if mapped == "" {
+			return parse(fileName, text, jsx, force)
+		}
+		response, err := os.ReadFile(mapped)
+		if err != nil {
+			panic(err)
+		}
+		return parseMapped(fileName, text, response, supplemental, jsx, force)
 	}
 	switch mode {
 	case "--bench":
@@ -81,9 +140,9 @@ func main() {
 	case "--tree":
 		w := bufio.NewWriter(os.Stdout)
 		defer w.Flush()
-		tree(w, parse(fileName, text, jsx, force))
+		tree(w, load())
 	case "":
-		bytes, _, err := encoder.EncodeSourceFile(parse(fileName, text, jsx, force))
+		bytes, _, err := encoder.EncodeSourceFile(load())
 		if err != nil {
 			panic(err)
 		}

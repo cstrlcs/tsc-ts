@@ -25,7 +25,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname } from 'node:path';
-import type { ProcessChannel } from '../compiler/content-mapper-process-host.js';
+import type { ProcessChannel, ProcessSpawner } from '../compiler/content-mapper-process-host.js';
 import { DirectoryEntries } from '../compiler/file-system.js';
 import { combinePaths, isNetworkPath, normalizePath, pathIsAbsolute } from '../compiler/path.js';
 import type { Program } from '../compiler/program.js';
@@ -610,6 +610,15 @@ export function createNodeSystem(libraryPath: string, bundledLibs: string): Syst
 /** Writes the files checker threads emit (parallel-check.ts) as the system of `runTsc` does. */
 export function outputWriterOfThread(libraryPath: string): OutputWriter {
   return new SystemWriter(new NodeSystem(normalizePath(process.cwd()), false, 0, normalizePath(libraryPath), ''));
+}
+
+/**
+ * What starts the processes of content mappers for the API server, as the system of `runTsc` starts them. It
+ * leaves standard output alone, which the server answers on: asking whether it is a terminal makes writes to a
+ * pipe fail when the pipe is full.
+ */
+export function createProcessSpawner(): ProcessSpawner {
+  return new NodeSystem(normalizePath(process.cwd()), false, 0, '', '');
 }
 
 /** What `runTsc` returns when it keeps watching for changes instead of exiting. */

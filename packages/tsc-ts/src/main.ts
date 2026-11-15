@@ -7,6 +7,7 @@ import { runThread, startThreads, type ThreadData, type ThreadDrivers } from './
 import { runDoctor } from './drivers/doctor.js';
 import { mark, markMemory, timeline } from './compiler/timeline.js';
 import {
+  createProcessSpawner,
   outputWriterOfThread,
   parseThreadOfCommandLine,
   programOfCommandLine,
@@ -46,7 +47,7 @@ else {
   const status = doctor
     ? runDoctor(args.slice(1))
     : args[0] === '--api'
-      ? runServer(args.slice(1), defaultLibraryPath)
+      ? runServer(args.slice(1), defaultLibraryPath, createProcessSpawner())
       : runTsc(args, defaultLibraryPath);
   // Watch mode and `--checkers` keep running until their callbacks exit.
   if (status !== watching) {

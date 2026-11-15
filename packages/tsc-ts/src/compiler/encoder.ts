@@ -192,7 +192,9 @@ import {
   propertyAssignmentModifiers,
   callTypeArguments,
 } from './ast.js';
+import type { MappedDiagnosticDirective } from './content-mapper.js';
 import { getJSDoc } from './parser.js';
+import { type SpanMap, SpanMapFeature } from './span-map.js';
 import { SyntaxKind } from './syntax-kind.js';
 import { hash128 } from './xxh3.js';
 import { utf8Offsets } from './character-codes.js';
@@ -1512,6 +1514,47 @@ function writeFileReferences(out: ByteWriter, refs: readonly FileReference[]): n
   return offset;
 }
 
+/**
+ * Writes the span map of a content mapped file: for each segment its start and length in the file's text,
+ * its start and length in the original text, its kind, and its features unless the segment has them all.
+ */
+function writeSpanMap(out: ByteWriter, spanMap: SpanMap | undefined): number {
+  if (spanMap === undefined) return noStructuredData;
+  const offset = out.length;
+  writeArrayHeader(out, spanMap.segments.length);
+  for (const segment of spanMap.segments) {
+    const allFeatures = segment.features === SpanMapFeature.All;
+    writeArrayHeader(out, allFeatures ? 5 : 6);
+    writeUint(out, segment.virtualStart);
+    writeUint(out, segment.virtualEnd - segment.virtualStart);
+    writeUint(out, segment.originalStart);
+    writeUint(out, segment.originalEnd - segment.originalStart);
+    writeUint(out, segment.kind);
+    if (!allFeatures) writeUint(out, segment.features);
+  }
+  return offset;
+}
+
+/**
+ * Writes the diagnostic directives of a content mapped file: for each its start and length in the original
+ * text, the start and length of the range of the file's text it governs, its policy and its unused code.
+ */
+function writeDiagnosticDirectives(out: ByteWriter, directives: readonly MappedDiagnosticDirective[]): number {
+  if (directives.length === 0) return noStructuredData;
+  const offset = out.length;
+  writeArrayHeader(out, directives.length);
+  for (const directive of directives) {
+    writeArrayHeader(out, 6);
+    writeUint(out, directive.originalPos);
+    writeUint(out, directive.originalEnd - directive.originalPos);
+    writeUint(out, directive.virtualPos);
+    writeUint(out, directive.virtualEnd - directive.virtualPos);
+    writeUint(out, directive.policy);
+    writeUint(out, directive.unusedCode);
+  }
+  return offset;
+}
+
 /** Walks the tree in the API's order and writes node records. */
 class Encoder extends NodeVisitor {
   /** The file whose JSDoc comments are encoded, if any. */
@@ -1796,26 +1839,36 @@ class Encoder extends NodeVisitor {
       );
       out.u32((node as TemplateTail).templateFlags);
     } else if (node instanceof SourceFile) {
-      const text = strings.addFileText((node as SourceFile).pos, (node as SourceFile).end);
+      const file: SourceFile = node;
+      const text = strings.addFileText(file.pos, file.end);
+      // The text a content mapper transformed is a string of its own; any other file's is its text.
+      const originalText = file.originalText();
+      const original = originalText !== file.text ? strings.add(originalText, SyntaxKind.Unknown, 0, 0) : text;
       out.u32(text);
-      out.u32(strings.add((node as SourceFile).fileName, SyntaxKind.Unknown, 0, 0));
-      out.u32(strings.add((node as SourceFile).path, SyntaxKind.Unknown, 0, 0));
-      out.u32((node as SourceFile).languageVariant);
-      out.u32((node as SourceFile).scriptKind);
-      out.u32(writeFileReferences(this.structured, (node as SourceFile).referencedFiles));
-      out.u32(writeFileReferences(this.structured, (node as SourceFile).typeReferenceDirectives));
-      out.u32(writeFileReferences(this.structured, (node as SourceFile).libReferenceDirectives));
+      out.u32(strings.add(file.fileName, SyntaxKind.Unknown, 0, 0));
+      out.u32(strings.add(file.path, SyntaxKind.Unknown, 0, 0));
+      out.u32(file.languageVariant);
+      out.u32(file.scriptKind);
+      out.u32(writeFileReferences(this.structured, file.referencedFiles));
+      out.u32(writeFileReferences(this.structured, file.typeReferenceDirectives));
+      out.u32(writeFileReferences(this.structured, file.libReferenceDirectives));
       // Imports, module augmentations, ambient module names and the external module
       // indicator are patched in after the walk.
       out.u32(noStructuredData);
       out.u32(noStructuredData);
       out.u32(noStructuredData);
       out.u32(0);
-      // The original text is the text, and the content mapper fields (span map, supplemental
-      // file names, canonical file name, mapper, virtual file name, diagnostic directives) are
-      // empty: tsc-ts maps no file contents.
-      out.u32(text);
-      for (let i = 0; i < 6; i++) out.u32(noStructuredData);
+      out.u32(original);
+      // What a content mapper produced the file with; empty for any other file.
+      out.u32(writeSpanMap(this.structured, file.spanMap()));
+      out.u32(this.writeStrings(file.supplementalSourceFiles().map((supplemental) => supplemental.fileName)));
+      const canonical = file.canonicalSourceFile();
+      out.u32(canonical !== undefined ? strings.add(canonical.fileName, SyntaxKind.Unknown, 0, 0) : noStructuredData);
+      const contentMapper = file.contentMapper();
+      out.u32(contentMapper !== '' ? strings.add(contentMapper, SyntaxKind.Unknown, 0, 0) : noStructuredData);
+      const virtualFileName = file.virtualFileName();
+      out.u32(virtualFileName !== '' ? strings.add(virtualFileName, SyntaxKind.Unknown, 0, 0) : noStructuredData);
+      out.u32(writeDiagnosticDirectives(this.structured, file.diagnosticDirectives()));
     } else throw new Error(`no extended data for kind ${node.kind}`);
     return offset;
   }
@@ -1864,8 +1917,12 @@ class Utf8Positions {
   }
 }
 
-/** The API's binary encoding of `file`. */
-export function encodeSourceFile(file: SourceFile): Uint8Array {
+/**
+ * The API's binary encoding of `file`. Its header carries `hash`, the content hash of the file, which is
+ * that of its text unless the caller keeps the file by another: an API session keeps a content mapped file
+ * by the hash of what it was transformed from and by.
+ */
+export function encodeSourceFile(file: SourceFile, hash: Uint8Array | undefined = undefined): Uint8Array {
   const fileText = utf8Encoder.encode(file.text);
   const encoder = new Encoder(file, file.text, fileText, file.nodeCount);
   const tracked = encoder.tracked;
@@ -1890,7 +1947,7 @@ export function encodeSourceFile(file: SourceFile): Uint8Array {
   extended.setU32(44, indicatorIndex);
 
   const options = file.externalModuleIndicatorOptions;
-  return encoder.finish(fileText, hash128(fileText), (options.jsx ? 1 : 0) | (options.force ? 2 : 0));
+  return encoder.finish(fileText, hash ?? hash128(fileText), (options.jsx ? 1 : 0) | (options.force ? 2 : 0));
 }
 
 /**

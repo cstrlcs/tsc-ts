@@ -4,15 +4,17 @@ import { Client, snapshotRequest } from './client.mjs';
 import { compareSourceFile, IdMap, symbolKey } from './compare.mjs';
 
 export class Differential {
-  constructor(expectedCommand, actualCommand, cwd, actualEnv) {
-    this.expected = new Client(expectedCommand, cwd);
-    this.actual = new Client(actualCommand, cwd, actualEnv);
+  // `args` are more flags for both servers, and `env` more environment variables for both.
+  constructor(expectedCommand, actualCommand, cwd, actualEnv, { args = [], env = {} } = {}) {
+    this.expected = new Client(expectedCommand, cwd, env, { args });
+    this.actual = new Client(actualCommand, cwd, { ...env, ...actualEnv }, { args });
     this.ids = new IdMap();
     this.count = 0;
     this.failures = [];
     // The snapshot `snapshot` makes the next one from.
     this.latestSnapshot = undefined;
-    // Whether a request has invalidated every file, after which tsc lists a config's file names in no fixed order.
+    // Whether a request has invalidated every file or created one, after which tsc lists a config's file names in
+    // no fixed order.
     this.invalidated = false;
     // Encoded source files by path, to name nodes.
     this.files = new Map();
@@ -45,12 +47,20 @@ export class Differential {
       }
       const expected = JSON.parse(a.payload.toString());
       const actual = JSON.parse(b.payload.toString());
-      // After invalidateAll, tsc lists the files a config's patterns match in no fixed order, in that reply and in
-      // each later one that carries a project.
-      if (params?.changes?.fileNotifications?.invalidateAll === true) this.invalidated = true;
+      // After invalidateAll or a created file, tsc lists the files a config's patterns match in no fixed order, in
+      // that reply and in each later one that carries a project.
+      const notifications = params?.changes?.fileNotifications;
+      if (notifications?.invalidateAll === true || (notifications?.created ?? []).length > 0) this.invalidated = true;
       if (this.invalidated) {
         for (const reply of [expected, actual]) {
           for (const project of reply?.projects ?? [reply]) project?.parsedCommandLine?.fileNames?.sort();
+        }
+      }
+      // tsc lists the files of a project that changed between two snapshots in no fixed order.
+      for (const reply of [expected, actual]) {
+        for (const files of Object.values(reply?.changes?.changedProjects ?? {})) {
+          files.changedFiles?.sort();
+          files.deletedFiles?.sort();
         }
       }
       if (returnsNodes(method)) {

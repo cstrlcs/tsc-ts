@@ -402,6 +402,8 @@ export interface DiagnosticResponse {
   sourceLines?: { line: number; text: string }[];
   code: number;
   category: number;
+  // What precedes the code in place of `TS`, for a diagnostic of a content mapper.
+  source?: string;
   text: string;
   reportsUnnecessary?: boolean;
   reportsDeprecated?: boolean;

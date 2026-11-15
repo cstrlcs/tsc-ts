@@ -18,6 +18,9 @@ export interface SessionOptions {
   // Keep each source file's encoding after the first getSourceFile, for the clients that follow (`--listen`,
   // where parsed files outlive a client).
   keepEncodings?: boolean;
+  // What runs the content mappers of projects (`--runExternalCode`); without it, a config's content mappers are an
+  // error of the config, as in tsc --api.
+  contentMappers?: backend.SessionContentMappers;
 }
 
 // A project as one snapshot has it. Snapshots share it until it changes, which makes a new one.
@@ -280,7 +283,13 @@ export class Session {
     this.nextLeaseId = 1;
     this.objectReferences = false;
     this.files.reset();
+    this.options.contentMappers?.retain([]);
     this.resetServerTiming();
+  }
+
+  // Ends the session: stops the content mappers it started.
+  close(): void {
+    this.options.contentMappers?.close();
   }
 
   // Handles a request whose payload is its JSON params, or for `echo`, any bytes.
@@ -642,11 +651,13 @@ export class Session {
     return true;
   }
 
-  // Keeps the parsed files of the projects of live snapshots, and the leased files.
+  // Keeps the parsed files of the projects of live snapshots, and the leased files, and the content mappers of those
+  // projects.
   private retainFiles(): void {
     const projects = new Set<Project>();
     for (const snapshot of this.snapshots.values()) for (const p of snapshot.projects) projects.add(p.project);
     this.files.retain([...projects], [...this.leases.values()]);
+    this.options.contentMappers?.retain([...projects]);
   }
 
   // Loads a configured project unless the snapshot has it.
@@ -736,7 +747,7 @@ export class Session {
       project =
         paths.length === 1 && containsFile(loaded, paths[0]) && !paths[0].endsWith('/package.json')
           ? loaded.project.update(host, paths[0])
-          : loaded.project.reload(host);
+          : loaded.project.reload(host, paths);
     }
     state.set(newLoadedProject(loaded.id, loaded.configFileName, loaded.inferred, project));
   }
@@ -1498,6 +1509,7 @@ export class Session {
       defaultLibraryPath: this.options.defaultLibraryPath,
       useCaseSensitiveFileNames: this.options.useCaseSensitiveFileNames,
       files: this.files,
+      contentMappers: this.options.contentMappers,
     };
   }
 
@@ -2012,6 +2024,7 @@ function diagnosticResponse(d: backend.Diagnostic): proto.DiagnosticResponse {
     sourceLines: d.sourceLines.length > 0 ? d.sourceLines.map((l) => ({ line: l.line, text: l.text })) : undefined,
     code: d.code,
     category: d.category,
+    source: d.source === '' ? undefined : d.source,
     text: d.text,
     reportsUnnecessary: d.reportsUnnecessary ? true : undefined,
     reportsDeprecated: d.reportsDeprecated ? true : undefined,

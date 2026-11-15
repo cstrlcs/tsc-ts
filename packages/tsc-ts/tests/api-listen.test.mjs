@@ -4,10 +4,11 @@
 // socket file. native/listen-posix.test.c checks how it treats a socket file that exists.
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { appendFileSync, cpSync, existsSync, readFileSync } from 'node:fs';
+import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 import { callbacks, Client } from './client.mjs';
 import { tempDir } from './temp.mjs';
 import { tscTs, tscTsMissing } from './toolchain.mjs';
@@ -247,6 +248,72 @@ test(
       }
     } finally {
       child.kill();
+    }
+  },
+);
+
+// With --runExternalCode the content mappers of a client's projects stop when the client leaves. The next client
+// gets the files of a transform the server kept, as it gets parsed files, and a file whose text changed is
+// transformed by a mapper that is started again.
+test(
+  'the content mappers of a client stop when it leaves, and run again for the next',
+  { skip, timeout: 120_000 },
+  async () => {
+    const dir = tempDir('tsc-ts-api-listen-');
+    const log = join(dir, 'mapper.log');
+    // A mapper that maps a file to itself, reports an error at its start, and logs each message it receives.
+    const mapper = [
+      process.execPath,
+      fileURLToPath(new URL('./content-mapper-scripted.mjs', import.meta.url)),
+      JSON.stringify({ verbatim: true, log }),
+    ];
+    const config = join(dir, 'tsconfig.json');
+    const mapped = join(dir, 'a.map');
+    writeFileSync(
+      config,
+      JSON.stringify({
+        compilerOptions: { noEmit: true, types: [] },
+        contentMappers: [{ package: 'mapper', extensions: ['.map'] }],
+      }),
+    );
+    mkdirSync(join(dir, 'node_modules/mapper'), { recursive: true });
+    writeFileSync(
+      join(dir, 'node_modules/mapper/package.json'),
+      JSON.stringify({ name: 'mapper', version: '1.0.0', typescript: { contentMapper: { exec: mapper } } }),
+    );
+    writeFileSync(mapped, 'export const a = 1;\n');
+    // What a client sees of the mapped file: its encoding, and the mapper's error.
+    const answers = async (client) => {
+      await client.json('initialize');
+      const update = await client.snapshot({ openProjects: [config] });
+      const base = { snapshot: update.snapshot, project: update.projects[0].id };
+      const file = await client.request('getSourceFile', { ...base, file: mapped });
+      const errors = await client.json('getSyntacticDiagnostics', base);
+      assert.equal(await client.close(), 0, client.stderr);
+      return [file.payload.toString('base64'), errors.map((error) => [error.source, error.code, error.text])];
+    };
+    const received = () =>
+      readFileSync(log, 'utf8')
+        .split('\n')
+        .filter((line) => line !== '')
+        .map((line) => JSON.parse(line))
+        .map((message) => message.method ?? message[0]);
+    const once = ['start', 'initialize', 'openProject', 'transform', 'closeProject'];
+    const server = listen(dir, ['--idle-exit', '1', '--runExternalCode']);
+    await server.ready;
+    try {
+      const first = await answers(Client.connect(server.socket));
+      assert.deepEqual(first[1], [['mapper', 9999, 'boom']]);
+      assert.deepEqual(await answers(Client.connect(server.socket)), first);
+      assert.deepEqual(received(), once);
+      writeFileSync(mapped, 'export const a = 2;\n');
+      const edited = await answers(Client.connect(server.socket));
+      assert.notEqual(edited[0], first[0]);
+      assert.deepEqual(edited[1], first[1]);
+      assert.equal(await server.exited, 0, server.stderr);
+      assert.deepEqual(received(), [...once, ...once]);
+    } finally {
+      server.child.kill();
     }
   },
 );

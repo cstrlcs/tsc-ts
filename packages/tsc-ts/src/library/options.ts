@@ -135,6 +135,7 @@ export interface ApiCompilerOptions {
   build?: boolean;
   help?: boolean;
   all?: boolean;
+  runExternalCode?: boolean;
   pprofDir?: string;
   singleThreaded?: boolean;
   quiet?: boolean;
@@ -270,6 +271,7 @@ export function compilerOptionsOf(o: CompilerOptionsValue): ApiCompilerOptions {
     build: o.build,
     help: o.help,
     all: o.all,
+    runExternalCode: o.runExternalCode,
     pprofDir: text(o.pprofDir),
     singleThreaded: o.singleThreaded,
     quiet: o.quiet,
@@ -294,7 +296,8 @@ function pathMappings(paths: Map<string, string[] | undefined> | undefined): Rec
 
 /**
  * tsc-ts's compiler options for options in the form tsgo's API returns them (`compilerOptionsOf`). `lib`
- * may name libraries as in tsconfig.json (`es2025`) or by file name (`lib.es2025.d.ts`).
+ * may name libraries as in tsconfig.json (`es2025`) or by file name (`lib.es2025.d.ts`). `runExternalCode`
+ * is not taken: only `tsc-ts --api` sets it, for the session.
  */
 export function compilerOptionsFromApi(o: ApiCompilerOptions): CompilerOptionsValue {
   return {

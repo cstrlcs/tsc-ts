@@ -11,7 +11,7 @@ import {
   type SourceFile as AstSourceFile,
 } from '../compiler/ast.js';
 import { getTouchingPropertyName } from '../compiler/astnav.js';
-import { hash128String, toHex } from '../compiler/xxh3.js';
+import { hash128, hash128String, toHex } from '../compiler/xxh3.js';
 import { getSourceFileOfNode } from '../compiler/binder-utilities.js';
 import type { Checker } from '../compiler/checker.js';
 import {
@@ -89,10 +89,30 @@ import {
   type IndexType,
   type UnionOrIntersectionType,
 } from '../compiler/checker-types.js';
+import {
+  type ContentMapper,
+  type ContentMapperHost,
+  type ContentMapperProject,
+  ContentMapperProjectSpec,
+  SupplementalFileCollisionError,
+} from '../compiler/content-mapper.js';
+import { ContentMapperProcessHost, type ProcessSpawner } from '../compiler/content-mapper-process-host.js';
 import { decodeNodes } from '../compiler/decoder.js';
-import { type Diagnostic as CompilerDiagnostic, Locale } from '../compiler/diagnostics.js';
+import {
+  createCompilerDiagnostic,
+  type Diagnostic as CompilerDiagnostic,
+  type DiagnosticFile,
+  Diagnostics,
+  Locale,
+  resolveDiagnosticLocation,
+} from '../compiler/diagnostics.js';
 import { encodeNode, encodeSourceFile as encodeFile, NodeIndexTable } from '../compiler/encoder.js';
-import { CompilerHost, FileLoader } from '../compiler/file-loader.js';
+import {
+  CompilerHost,
+  ContentMappedSourceFiles,
+  type ContentMapperFailure,
+  FileLoader,
+} from '../compiler/file-loader.js';
 import { CachedFileSystem, DirectoryEntries, FileSystem } from '../compiler/file-system.js';
 import { signatureToSignatureDeclaration, typeToStringFromTypeNode, typeToTypeNode } from '../compiler/node-builder.js';
 import {
@@ -107,6 +127,7 @@ import { EmitContext } from '../compiler/printer/emit-context.js';
 import { Printer, PrinterOptions } from '../compiler/printer/printer.js';
 import { Program } from '../compiler/program.js';
 import { CheckedProgram } from '../compiler/program-checker.js';
+import { SpanMapFidelity } from '../compiler/span-map.js';
 import { type ApiCompilerOptions as CompilerOptions, compilerOptionsOf } from '../library/options.js';
 export type { ApiCompilerOptions as CompilerOptions } from '../library/options.js';
 import { checkedFileDiagnostics, type DiagnosticKind, programDiagnostics } from '../library/diagnostics.js';
@@ -154,6 +175,11 @@ export interface ProjectHost {
   useCaseSensitiveFileNames: boolean;
   /** The session's files; without them, every read goes to `fs`. */
   files?: SessionFiles;
+  /**
+   * What runs the content mappers of the session's projects (`--runExternalCode`); without it, a config's content
+   * mappers are an error of the config and none runs.
+   */
+  contentMappers?: SessionContentMappers;
 }
 
 // A literal type's value, as sent to API clients.
@@ -186,7 +212,8 @@ export interface SourceFileMetadata {
 /**
  * A diagnostic as the API answers it. One in a file also has the zero-based lines and UTF-16 characters of `pos` and
  * `end`, and the source lines to show it with: each from the first to the last, or the first two and the last two
- * of five or more, as TypeScript 7.1 sends them.
+ * of five or more, as TypeScript 7.1 sends them. One in a file a content mapper produced is where its range maps
+ * to in the original text, with the lines of that text, under the name of the original file.
  */
 export interface Diagnostic {
   readonly fileName: string | undefined;
@@ -197,6 +224,8 @@ export interface Diagnostic {
   readonly sourceLines: readonly DiagnosticSourceLine[];
   readonly code: number;
   readonly category: number;
+  /** For a diagnostic of a content mapper, what precedes its code in place of `TS`; `''` otherwise. */
+  readonly source: string;
   readonly text: string;
   readonly reportsUnnecessary: boolean;
   readonly reportsDeprecated: boolean;
@@ -254,6 +283,8 @@ class ProjectPackages {
 // queries. Diagnostics come from a separate checker, as in tsc --api.
 export class Project {
   private readonly checker: Checker;
+  // The paths of the files the project's content mappers say their configuration depends on.
+  private readonly mapperWatchedPaths: readonly string[];
   // The exports auto-imports offer from the program's files, extracted with a checker of their own on first use.
   private autoImports: AutoImportRegistry | undefined;
   // The node_modules buckets of auto-imports, by importing directory.
@@ -268,24 +299,34 @@ export class Project {
     private readonly loadedThrough: CachedFileSystem,
     // Where auto-imports read packages from.
     private readonly host: ProjectHost,
+    /**
+     * The config's content mappers as this program holds them open, until the session closes them
+     * (`SessionContentMappers.retain`).
+     */
+    readonly contentMappers: ContentMapperProject | undefined,
   ) {
     this.checker = checked.createChecker();
+    this.mapperWatchedPaths = this.watchedPathsOfMappers();
   }
 
   private static load(config: ParsedCommandLine, host: ProjectHost, configSeen: readonly string[]): Project {
     const fs = new CachedFileSystem(new HostFileSystem(host));
-    const compilerHost = projectCompilerHost(fs, host);
+    const contentMappers = host.contentMappers?.project(config);
+    const compilerHost = projectCompilerHost(fs, host, contentMappers);
     // A project loads the sources of the projects it references, as tsgo's project service creates its programs.
     const program = new Program(config, compilerHost, new FileLoader(compilerHost, config, true));
-    return new Project(config, configSeen, new CheckedProgram(program), fs, host);
+    return new Project(config, configSeen, new CheckedProgram(program), fs, host, contentMappers);
   }
 
   static open(host: ProjectHost, configFileName: string): Project {
     const errors: CompilerDiagnostic[] = [];
     const seen = new Set<string>();
     const fs = new HostFileSystem(host, seen);
+    // A session that runs external code reads a config as the command line does with `--runExternalCode`.
+    const options: CompilerOptionsValue | undefined =
+      host.contentMappers !== undefined ? { runExternalCode: true } : undefined;
     const config =
-      new ConfigParser(fs, host.currentDirectory).parseConfigFile(configFileName, undefined, undefined, errors) ??
+      new ConfigParser(fs, host.currentDirectory).parseConfigFile(configFileName, options, undefined, errors) ??
       new ParsedCommandLine(
         {},
         undefined,
@@ -340,15 +381,26 @@ export class Project {
 
   /**
    * Whether a change to the file at `path` can affect the project: the config read it, the program has it,
-   * or loading the program looked it up (a package.json or a module resolution candidate; the compiler
-   * reads no other file without looking it up first).
+   * loading the program looked it up (a package.json or a module resolution candidate; the compiler
+   * reads no other file without looking it up first), or a content mapper of the project watches it.
    */
   depends(path: string): boolean {
     return (
       this.configSeen.includes(path) ||
       this.loadedThrough.lookedUpFile(path) ||
-      this.program.getSourceFileByPath(path) !== undefined
+      this.program.getSourceFileByPath(path) !== undefined ||
+      this.mapperWatchedPaths.includes(path)
     );
+  }
+
+  // The files the content mappers watch are asked once the program is made, and only of a program that has a
+  // content mapped file, as tsgo's project service does; mappers that cannot say watch none.
+  private watchedPathsOfMappers(): string[] {
+    const program = this.program;
+    if (this.contentMappers === undefined || !program.getSourceFiles().some((file) => file.contentMapper() !== ''))
+      return [];
+    const watched = this.contentMappers.watchedFiles();
+    return Array.isArray(watched) ? watched.map((fileName) => program.toPath(fileName)) : [];
   }
 
   /** Whether reading the config read or looked up the file at `path`. */
@@ -358,9 +410,11 @@ export class Project {
 
   /**
    * The project with a new program from the same config, for changes that leave the config's files and
-   * the files its patterns match as they were.
+   * the files its patterns match as they were. A content mapper reads the files it watches when its project
+   * is opened, so a change to one of them, among the `changed` paths, opens the mappers' projects again.
    */
-  reload(host: ProjectHost): Project {
+  reload(host: ProjectHost, changed: readonly string[] = []): Project {
+    if (changed.some((path) => this.mapperWatchedPaths.includes(path))) this.contentMappers?.refresh();
     return Project.load(this.config, host, this.configSeen);
   }
 
@@ -370,12 +424,21 @@ export class Project {
    * with one changed file.
    */
   update(host: ProjectHost, path: string): Project {
+    if (this.mapperWatchedPaths.includes(path)) return this.reload(host, [path]);
+    const contentMappers = host.contentMappers?.project(this.config);
     const program = this.program.updateFile(
       path,
-      projectCompilerHost(new CachedFileSystem(new HostFileSystem(host)), host),
+      projectCompilerHost(new CachedFileSystem(new HostFileSystem(host)), host, contentMappers),
     );
     if (program === undefined) return this.reload(host);
-    return new Project(this.config, this.configSeen, new CheckedProgram(program), this.loadedThrough, host);
+    return new Project(
+      this.config,
+      this.configSeen,
+      new CheckedProgram(program),
+      this.loadedThrough,
+      host,
+      contentMappers,
+    );
   }
 
   compilerOptions(): CompilerOptions {
@@ -931,6 +994,8 @@ export class SessionFiles {
   // The parsed files of live snapshots and leases, by the inputs they were parsed with; a reparsed file's older
   // versions stay while something keeps them.
   private readonly retained = new Map<string, SourceFile[]>();
+  // The canonical files content mappers produced, by the inputs of their transforms, while something keeps them.
+  private readonly mapped = new Map<string, SourceFile[]>();
   // The node IDs of the files the client was told about, assigned on first use. A file parsed again gets a new one,
   // as tsc's node IDs do; a client of `--listen` sees the IDs a new server would give.
   private readonly nodeIds = new Map<SourceFile, number>();
@@ -1055,9 +1120,57 @@ export class SessionFiles {
   }
 
   /**
+   * The canonical file a content mapper produced for `fileName` from `content` under `transformIdentity`, its
+   * identity in the project, if an earlier transform with the same inputs is still kept: tsc keeps the files of a
+   * transform by the file's parse options, its content and the mapper's identity, and transforms a file again only
+   * when one of them changes.
+   */
+  mappedSourceFile(
+    fileName: string,
+    path: string,
+    externalModuleIndicatorOptions: ExternalModuleIndicatorOptions,
+    content: string,
+    transformIdentity: string,
+  ): SourceFile | undefined {
+    const key = parsedKey(fileName, path, externalModuleIndicatorOptions.jsx, externalModuleIndicatorOptions.force);
+    for (const file of this.mapped.get(key) ?? []) {
+      const info = file.contentMapperInfo;
+      if (info !== undefined && info.originalText === content && info.transformIdentity === transformIdentity)
+        return file;
+    }
+    return undefined;
+  }
+
+  /**
+   * Keeps `canonical`, which a content mapper produced for a file parsed with these inputs, and names it and its
+   * supplemental files by the hash tsc keeps them by (`mappedContentHash`).
+   */
+  keepMappedSourceFile(
+    path: string,
+    externalModuleIndicatorOptions: ExternalModuleIndicatorOptions,
+    canonical: SourceFile,
+  ): void {
+    const info = canonical.contentMapperInfo;
+    if (info === undefined) return;
+    const hash = mappedContentHash(info.originalText, info.transformIdentity);
+    canonical.apiContentHash = hash;
+    for (const supplemental of canonical.supplementalSourceFiles()) supplemental.apiContentHash = hash;
+    const key = parsedKey(
+      canonical.fileName,
+      path,
+      externalModuleIndicatorOptions.jsx,
+      externalModuleIndicatorOptions.force,
+    );
+    const versions = this.mapped.get(key);
+    if (versions === undefined) this.mapped.set(key, [canonical]);
+    else versions.push(canonical);
+  }
+
+  /**
    * The parsed file of a live snapshot or lease with these inputs, text hash (`sourceFileHash`) and script kind, as
    * tsc's parse cache keys files. `parseOptionsKey` holds the module detection options as `sourceFileParseOptionsKey`
-   * gives them. An older version of a file stays available while a snapshot or lease keeps it.
+   * gives them. An older version of a file stays available while a snapshot or lease keeps it. A file a content
+   * mapper produced is not among them: tsc keeps those apart, and no descriptor names one.
    */
   cachedSourceFile(
     fileName: string,
@@ -1068,6 +1181,7 @@ export class SessionFiles {
   ): SourceFile | undefined {
     const key = parsedKey(fileName, path, (parseOptionsKey & 1) !== 0, (parseOptionsKey & 2) !== 0);
     for (const file of this.retained.get(key) ?? []) {
+      if (file.contentMapperInfo !== undefined) continue;
       if (file.scriptKind === scriptKind && sourceFileHash(file) === contentHash) return file;
     }
     return undefined;
@@ -1088,9 +1202,73 @@ export class SessionFiles {
       if (versions === undefined) this.retained.set(key, [file]);
       else versions.push(file);
     }
+    for (const [key, versions] of Array.from(this.mapped)) {
+      const kept = versions.filter((file) => used.has(file));
+      if (kept.length > 0) this.mapped.set(key, kept);
+      else this.mapped.delete(key);
+    }
     const unnamed: SourceFile[] = [];
     for (const file of this.nodeIds.keys()) if (!used.has(file)) unnamed.push(file);
     for (const file of unnamed) this.nodeIds.delete(file);
+  }
+}
+
+/**
+ * The hash tsc's project service keeps the files of a transform by, which names them in API answers in place of
+ * the hash of their text: that of the hash of the original content and the hash of the mapper's identity in the
+ * project, each as its high and its low 64 bits, followed by the name of the locale of the mapper's messages,
+ * which for the default locale is empty.
+ */
+function mappedContentHash(content: string, transformIdentity: string): string {
+  const folded = new Uint8Array(32);
+  const contentHash = hash128String(content);
+  folded.set(contentHash.subarray(8), 0);
+  folded.set(contentHash.subarray(0, 8), 8);
+  const identityHash = hash128String(transformIdentity);
+  folded.set(identityHash.subarray(8), 16);
+  folded.set(identityHash.subarray(0, 8), 24);
+  return toHex(hash128(folded));
+}
+
+/**
+ * The content mappers of a session's projects, run as the processes their packages declare, as
+ * `tsc --api --runExternalCode` runs them. A program holds the mappers of its config open, and they run, while a
+ * snapshot has the program; mappers write their messages in the default locale, which the API's diagnostics are in.
+ */
+export class SessionContentMappers {
+  private readonly host: ContentMapperHost;
+  // The mappers each program made so far holds, until they are closed.
+  private readonly open = new Set<ContentMapperProject>();
+
+  constructor(spawner: ProcessSpawner) {
+    this.host = new ContentMapperProcessHost(spawner, '');
+  }
+
+  /** The content mappers of `config` for a program of it to hold open; undefined for a config without any. */
+  project(config: ParsedCommandLine): ContentMapperProject | undefined {
+    if (config.contentMappers.length === 0) return undefined;
+    const project = this.host.project(
+      new ContentMapperProjectSpec(config.configName, config.contentMappers, config.options),
+    );
+    this.open.add(project);
+    return project;
+  }
+
+  /** Closes the mappers of the programs that are not those of `projects`, the projects of live snapshots. */
+  retain(projects: readonly Project[]): void {
+    const held = new Set<ContentMapperProject>();
+    for (const project of projects) if (project.contentMappers !== undefined) held.add(project.contentMappers);
+    for (const mappers of Array.from(this.open)) {
+      if (held.has(mappers)) continue;
+      mappers.close();
+      this.open.delete(mappers);
+    }
+  }
+
+  /** Closes the mappers of every program, and stops every mapper. */
+  close(): void {
+    this.retain([]);
+    this.host.close();
   }
 }
 
@@ -1098,8 +1276,19 @@ function parsedKey(fileName: string, path: string, jsx: boolean, force: boolean)
   return fileName + '\u0000' + path + (jsx ? '\u0000j' : '\u0000') + (force ? 'f' : '');
 }
 
-function projectCompilerHost(fs: CachedFileSystem, host: ProjectHost): ProjectCompilerHost {
-  return new ProjectCompilerHost(fs, host.currentDirectory, host.defaultLibraryPath, host.files);
+function projectCompilerHost(
+  fs: CachedFileSystem,
+  host: ProjectHost,
+  contentMappers: ContentMapperProject | undefined,
+): ProjectCompilerHost {
+  return new ProjectCompilerHost(
+    fs,
+    host.currentDirectory,
+    host.defaultLibraryPath,
+    host.files,
+    contentMappers,
+    host.contentMappers !== undefined,
+  );
 }
 
 // A compiler host that takes parsed files from the session's files.
@@ -1109,8 +1298,20 @@ class ProjectCompilerHost extends CompilerHost {
     currentDirectory: string,
     defaultLibraryPath: string,
     private readonly files: SessionFiles | undefined,
+    contentMappers: ContentMapperProject | undefined,
+    // Whether the session runs external code, and reads every config with `runExternalCode` set.
+    private readonly runExternalCode: boolean,
   ) {
-    super(fs, currentDirectory, defaultLibraryPath);
+    super(fs, currentDirectory, defaultLibraryPath, contentMappers);
+    this.referencedConfigParser = new ConfigParser(fs, currentDirectory);
+  }
+
+  private readonly referencedConfigParser: ConfigParser;
+
+  // The config of a referenced project is read as the project's own is (`Project.open`).
+  getResolvedProjectReference(fileName: string): ParsedCommandLine | undefined {
+    if (!this.runExternalCode) return super.getResolvedProjectReference(fileName);
+    return this.referencedConfigParser.parseConfigFile(fileName, { runExternalCode: true }, undefined, []);
   }
 
   getSourceFile(
@@ -1122,6 +1323,32 @@ class ProjectCompilerHost extends CompilerHost {
     const text = this.fs.readFile(fileName);
     if (text === undefined) return undefined;
     return this.files.sourceFile(fileName, path, externalModuleIndicatorOptions, text);
+  }
+
+  // The files of an earlier transform of the same content by the same mapper identity are taken again, as long
+  // as none of the supplemental files has the name of a file that exists now.
+  getContentMappedSourceFiles(
+    fileName: string,
+    path: string,
+    externalModuleIndicatorOptions: ExternalModuleIndicatorOptions,
+    mapper: ContentMapper,
+  ): ContentMappedSourceFiles | ContentMapperFailure | undefined {
+    const files = this.files;
+    const transformIdentity = this.contentMapperProject?.identity(mapper);
+    const content = this.fs.readFile(fileName);
+    if (files === undefined || typeof transformIdentity !== 'string' || content === undefined)
+      return super.getContentMappedSourceFiles(fileName, path, externalModuleIndicatorOptions, mapper);
+    const kept = files.mappedSourceFile(fileName, path, externalModuleIndicatorOptions, content, transformIdentity);
+    if (kept === undefined) {
+      const mapped = super.getContentMappedSourceFiles(fileName, path, externalModuleIndicatorOptions, mapper);
+      if (mapped instanceof ContentMappedSourceFiles)
+        files.keepMappedSourceFile(path, externalModuleIndicatorOptions, mapped.canonical);
+      return mapped;
+    }
+    const supplemental = kept.supplementalSourceFiles();
+    for (const file of supplemental)
+      if (this.fs.fileExists(file.fileName)) return new SupplementalFileCollisionError(file.fileName);
+    return new ContentMappedSourceFiles(kept, supplemental);
   }
 }
 
@@ -1191,21 +1418,32 @@ export function filePath(file: SourceFile): string {
   return file.path;
 }
 
-// Whether two versions of a file have the same contents.
+// Whether two versions of a file have the same contents. A file a content mapper produced is kept while its
+// original content and its mapper's identity are the same, so another version of it is another content.
 export function sameFileContent(a: SourceFile, b: SourceFile): boolean {
-  return a === b || a.text === b.text;
+  return a === b || (a.text === b.text && a.contentMapperInfo === undefined && b.contentMapperInfo === undefined);
 }
 
 // Encodes a source file in the API's binary AST format. The encoding's header names the file by its node ID
 // (`SessionFiles.nodeId`), as tsc's getSourceFile answer does.
 export function encodeSourceFile(file: SourceFile, nodeId: number): Uint8Array {
-  return withSourceFileId(encodeFile(file), nodeId);
+  return withSourceFileId(encodeFile(file, mappedFileHash(file)), nodeId);
 }
 
 // The file's encoding, made on first use and kept on the file. A parsed file's encoding does not change: lazily
 // parsed JSDoc encodes the same whenever it is parsed, and its node ID stays.
 export function keptEncodingOf(file: SourceFile, nodeId: number): Uint8Array {
-  return withSourceFileId((file.apiEncoding ??= encodeFile(file)), nodeId);
+  return withSourceFileId((file.apiEncoding ??= encodeFile(file, mappedFileHash(file))), nodeId);
+}
+
+// The digest that `sourceFileHash` gives for a file a content mapper produced, which is not the hash of its text;
+// undefined for any other file.
+function mappedFileHash(file: SourceFile): Uint8Array | undefined {
+  if (file.contentMapperInfo === undefined) return undefined;
+  const hex = sourceFileHash(file);
+  const digest = new Uint8Array(16);
+  for (let i = 0; i < 16; i++) digest[15 - i] = parseInt(hex.slice(2 * i, 2 * i + 2), 16);
+  return digest;
 }
 
 // Header bytes 44 to 51: the source file ID, a little-endian u64.
@@ -1277,9 +1515,14 @@ export function nodeAtIndex(file: SourceFile, index: number): Node | undefined {
 
 // Source files as API references name them (SourceFileDescriptor).
 
-/** The xxh3-128 hash of the file's text, as 32 hexadecimal digits, computed once per file. */
+/**
+ * The xxh3-128 hash of the file's text, as 32 hexadecimal digits, computed once per file. A file a content mapper
+ * produced has the hash the session keeps it by (`SessionFiles.keepMappedSourceFile`), and the empty file that
+ * stands in for a transform that failed, which nothing keeps, has none: zeros, as in tsc.
+ */
 export function sourceFileHash(file: SourceFile): string {
-  if (file.apiContentHash === '') file.apiContentHash = toHex(hash128String(file.text));
+  if (file.apiContentHash === '')
+    file.apiContentHash = file.isContentMapperFailureStub() ? '0'.repeat(32) : toHex(hash128String(file.text));
   return file.apiContentHash;
 }
 
@@ -1295,8 +1538,9 @@ export function sourceFileScriptKind(file: SourceFile): number {
 
 /**
  * The source file that owns a symbol's identity for clients, or undefined when its snapshot owns it: a transient
- * symbol (a merged or checker-made one), or one without a declaring file. A class's prototype, which has no
- * declaration, belongs to its class's file.
+ * symbol (a merged or checker-made one), one without a declaring file, or one of a file a content mapper produced,
+ * which no descriptor names (`SessionFiles.cachedSourceFile`). A class's prototype, which has no declaration,
+ * belongs to its class's file.
  */
 export function symbolOwnerFile(symbol: Symbol): SourceFile | undefined {
   if ((symbol.flags & SymbolFlags.Transient) !== 0) return undefined;
@@ -1307,7 +1551,9 @@ export function symbolOwnerFile(symbol: Symbol): SourceFile | undefined {
     if (declaring === undefined || (declaring.flags & SymbolFlags.Transient) !== 0) return undefined;
   }
   const declarations = getDeclarations(declaring);
-  return declarations.length === 0 ? undefined : getSourceFileOfNode(declarations[0]);
+  if (declarations.length === 0) return undefined;
+  const file = getSourceFileOfNode(declarations[0]);
+  return file.contentMapperInfo === undefined ? file : undefined;
 }
 
 /**
@@ -1582,9 +1828,11 @@ export function panicMessage(e: unknown): string {
 // Diagnostics.
 
 function apiDiagnosticOf(d: CompilerDiagnostic): Diagnostic {
-  const file = d.file;
-  let pos = d.pos;
-  let end = d.end;
+  // Where the diagnostic is shown: in a file a content mapper produced, at its place in the original text.
+  const location = resolveDiagnosticLocation(d);
+  const file: DiagnosticFile | undefined = location !== undefined ? location.file : d.file;
+  let pos = location !== undefined ? location.pos : d.pos;
+  let end = location !== undefined ? location.end : d.end;
   let startPosition: DiagnosticPosition | undefined = undefined;
   let endPosition: DiagnosticPosition | undefined = undefined;
   let sourceLines: DiagnosticSourceLine[] = [];
@@ -1608,12 +1856,28 @@ function apiDiagnosticOf(d: CompilerDiagnostic): Diagnostic {
     sourceLines,
     code: d.code,
     category: d.category,
+    source: d.source,
     text: d.localize(Locale.Default),
     reportsUnnecessary: d.reportsUnnecessary,
     reportsDeprecated: d.reportsDeprecated,
-    messageChain: d.messageChain.map(apiDiagnosticOf),
+    messageChain: [...d.messageChain, ...synthesizedTextNote(d)].map(apiDiagnosticOf),
     relatedInformation: d.relatedInformation.map(apiDiagnosticOf),
   };
+}
+
+// A compiler diagnostic that lies entirely in text a content mapper synthesized has no place in the original
+// text and is shown where it is in the file's text: its chain ends with a note that says so and names the mapper,
+// as the last line of the diagnostic on the command line does.
+function synthesizedTextNote(d: CompilerDiagnostic): CompilerDiagnostic[] {
+  const mapped = d.file?.mapped;
+  if (mapped === undefined || mapped.spanMap === undefined || d.source !== '') return [];
+  if (mapped.spanMap.virtualToOriginalSpan(d.pos, d.end).fidelity !== SpanMapFidelity.None) return [];
+  return [
+    createCompilerDiagnostic(
+      Diagnostics.This_location_is_in_virtual_code_produced_by_the_content_mapper_0_and_has_no_corresponding_location_in_the_original_file,
+      mapped.contentMapper,
+    ),
+  ];
 }
 
 /** The line of `position`: the last line starting at or before it. */

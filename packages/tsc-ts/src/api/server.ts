@@ -2,9 +2,11 @@
 // to one client at a time on a Unix socket it creates.
 //
 //   tsc --api [--cwd DIR] [--callbacks=readFile,fileExists,...] [--timing] [--pipe \\.\pipe\NAME]
-//             [--listen SOCKET [--idle-exit SECONDS]] [--default-libraries-from-disk]
+//             [--listen SOCKET [--idle-exit SECONDS]] [--default-libraries-from-disk] [--runExternalCode]
 import { existsSync } from 'node:fs';
+import type { ProcessSpawner } from '../compiler/content-mapper-process-host.js';
 import { getNormalizedAbsolutePath } from '../compiler/path.js';
+import { SessionContentMappers } from './backend.js';
 import { Connection } from './connection.js';
 import { ClientFileSystem, isCallback } from './fs.js';
 import type { Callback } from './fs.js';
@@ -19,6 +21,8 @@ interface ServerOptions {
   idleExit: number | undefined;
   // Read the files in the default library directory from the disk, without callbacks.
   librariesFromDisk: boolean;
+  // Let the content mappers that the configs of projects name run, as processes.
+  runExternalCode: boolean;
 }
 
 /** How long a `--listen` server waits for a client before it exits, by default. */
@@ -39,8 +43,9 @@ declare function tscTsAccept(listener: number, timeoutMs: number): number;
 declare function tscTsClose(fd: number): void;
 declare function tscTsUnlink(path: string): void;
 
-// Runs the server until the client closes its end; returns the exit status.
-export function runServer(args: string[], defaultLibraryPath: string): number {
+// Runs the server until the client closes its end; returns the exit status. With `--runExternalCode`, `spawner`
+// starts the processes of the content mappers of projects.
+export function runServer(args: string[], defaultLibraryPath: string, spawner: ProcessSpawner): number {
   const options = parseArgs(args);
   if (options === undefined) return 2;
   let input = 0;
@@ -63,14 +68,19 @@ export function runServer(args: string[], defaultLibraryPath: string): number {
       defaultLibraryPath,
       useCaseSensitiveFileNames: isFileSystemCaseSensitive(),
       keepEncodings: options.listen !== undefined,
+      contentMappers: options.runExternalCode ? new SessionContentMappers(spawner) : undefined,
     },
     options.timing,
   );
-  if (options.listen !== undefined)
-    return serveClients(options.listen, options.idleExit ?? defaultIdleExit, fs, session);
+  if (options.listen !== undefined) {
+    const status = serveClients(options.listen, options.idleExit ?? defaultIdleExit, fs, session);
+    session.close();
+    return status;
+  }
   const connection = new Connection(input, output);
   fs.connect(connection);
   connection.run(session);
+  session.close();
   return 0;
 }
 
@@ -142,6 +152,7 @@ function parseArgs(args: string[]): ServerOptions | undefined {
     listen: undefined,
     idleExit: undefined,
     librariesFromDisk: false,
+    runExternalCode: false,
   };
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -170,6 +181,9 @@ function parseArgs(args: string[]): ServerOptions | undefined {
         break;
       case 'default-libraries-from-disk':
         options.librariesFromDisk = eq < 0 || arg.slice(eq + 1) === 'true';
+        break;
+      case 'runExternalCode':
+        options.runExternalCode = eq < 0 || arg.slice(eq + 1) === 'true';
         break;
       case 'pipe': {
         // Only the native Windows build links the pipe server.
@@ -212,7 +226,7 @@ function parseArgs(args: string[]): ServerOptions | undefined {
 
 function usage(message: string): undefined {
   process.stderr.write(
-    `${message}\nUsage of api:\n  -callbacks string\n  -cwd string\n  -default-libraries-from-disk\n  -idle-exit int\n  -listen string\n  -pipe string\n  -timing\n`,
+    `${message}\nUsage of api:\n  -callbacks string\n  -cwd string\n  -default-libraries-from-disk\n  -idle-exit int\n  -listen string\n  -pipe string\n  -runExternalCode\n  -timing\n`,
   );
   return undefined;
 }
