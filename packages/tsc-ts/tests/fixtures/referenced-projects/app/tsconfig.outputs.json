@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "disableSourceOfProjectReferenceRedirect": true },
+  "references": [{ "path": "../lib" }, { "path": "../pkg" }]
+}

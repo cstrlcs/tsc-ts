@@ -1181,6 +1181,26 @@ projects.push(
     ['-p', 'apps/server'],
   ],
   [
+    // A declaration file of a referenced project has no declaration output to load in its place, so the
+    // referencing project loads it and checks it, like any other declaration file.
+    'a declaration file of a referenced project is checked',
+    {
+      'lib/a.ts': 'export const a = 1;\n',
+      'lib/globals.d.ts': 'declare const g: Missing;\n',
+      'lib/tsconfig.json': JSON.stringify({
+        compilerOptions: { composite: true, outDir: 'out', types: [] },
+        files: ['a.ts', 'globals.d.ts'],
+      }),
+      'app/main.ts': '/// <reference path="../lib/globals.d.ts" />\nexport const m: string = g;\n',
+      'app/tsconfig.json': JSON.stringify({
+        compilerOptions: base,
+        files: ['main.ts'],
+        references: [{ path: '../lib' }],
+      }),
+    },
+    ['-p', 'app'],
+  ],
+  [
     // `declare module 'foo';` comes first, so it is the module symbol's value declaration, and the default
     // import still resolves to the `default` export of the declaration with a body (issue #417).
     'a default import of a shorthand ambient module merged with a declaration with a body',

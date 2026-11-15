@@ -252,6 +252,98 @@ test('tsc-ts --api tracks projects and open files like tsc --api', { skip, timeo
   report(d);
 });
 
+// The references fixture: a project that imports two projects it references by their declaration outputs, one by a
+// relative path and one as a package linked into its node_modules, with neither built.
+function copyReferences() {
+  const dir = tempDir('tsc-ts-api-');
+  cpSync(resolve('tests/fixtures/referenced-projects'), dir, { recursive: true });
+  mkdirSync(join(dir, 'app/node_modules'));
+  symlinkSync(join(dir, 'pkg'), join(dir, 'app/node_modules/pkg'));
+  return dir;
+}
+
+// A project loads the sources of the projects it references in place of their declaration outputs, built or not,
+// and reports no errors in them; with disableSourceOfProjectReferenceRedirect it loads the outputs.
+test('tsc-ts --api loads the sources of referenced projects like tsc --api', { skip, timeout: 600_000 }, async () => {
+  const dir = copyReferences();
+  const d = new Differential([realTsc], tscTs, dir, env);
+  const main = join(dir, 'app/src/main.ts');
+  const index = join(dir, 'lib/src/index.ts');
+  const query = async (snapshot, project) => {
+    const base = { snapshot, project };
+    const fileNames = await d.call('getSourceFileNames', base);
+    const userFiles = [];
+    for (const file of fileNames.filter((name) => name.startsWith(dir))) {
+      const encoded = await d.call('getSourceFile', { ...base, file });
+      await d.call('getSourceFileMetadata', { ...base, file });
+      userFiles.push({ file, length: readFileSync(file, 'utf8').length, encoded });
+    }
+    for (const method of ['getConfigFileParsingDiagnostics', 'getProgramDiagnostics', 'getGlobalDiagnostics'])
+      await d.call(method, base);
+    for (const method of [
+      'getSyntacticDiagnostics',
+      'getBindDiagnostics',
+      'getSemanticDiagnostics',
+      'getSuggestionDiagnostics',
+    ]) {
+      await d.call(method, base);
+      for (const { file } of userFiles) await d.call(method, { ...base, files: [file] });
+    }
+    return { fileNames: fileNames.filter((name) => name.startsWith(dir)), userFiles };
+  };
+  try {
+    await d.call('initialize');
+    const sources = [main, index, join(dir, 'lib/src/util.ts'), join(dir, 'pkg/src/index.ts')].sort();
+    // A project's id is its config file's name.
+    const [app, preserve, outputs] = ['tsconfig.json', 'tsconfig.preserve.json', 'tsconfig.outputs.json'].map(
+      (config) => join(dir, 'app', config),
+    );
+    const update = await d.snapshot({ openProjects: [app, preserve, outputs] });
+    const loaded = await query(update.snapshot, app);
+    assert.deepEqual([...loaded.fileNames].sort(), sources);
+    const explored = await explore(d, update.snapshot, app, loaded.userFiles, 1500);
+    assert.ok(explored > 100, `explored ${explored} objects`);
+    assert.deepEqual([...(await query(update.snapshot, preserve)).fileNames].sort(), sources);
+    assert.deepEqual((await query(update.snapshot, outputs)).fileNames, [main]);
+
+    // The outputs, once built, are still not what the project loads.
+    mkdirSync(join(dir, 'lib/dist'));
+    writeFileSync(join(dir, 'lib/dist/index.d.ts'), 'export declare function twice(x: string): string;\n');
+    mkdirSync(join(dir, 'pkg/types'));
+    writeFileSync(join(dir, 'pkg/types/index.d.ts'), 'export declare const answer: string;\n');
+    const built = await d.snapshot({ fileNotifications: { invalidateAll: true } });
+    assert.deepEqual([...(await query(built.snapshot, app)).fileNames].sort(), sources);
+    assert.deepEqual([...(await query(built.snapshot, preserve)).fileNames].sort(), sources);
+    await query(built.snapshot, outputs);
+
+    // A change to a source of a referenced project changes the projects that load it.
+    writeFileSync(index, readFileSync(index, 'utf8').replace('area(): number', 'area(): string'));
+    const changed = await d.snapshot({ fileNotifications: { changed: [index] } });
+    for (const project of [app, preserve, outputs]) await query(changed.snapshot, project);
+
+    // With the referenced project open too, a file of it belongs to that project, and a file of the first to the
+    // first.
+    const lib = join(dir, 'lib/tsconfig.json');
+    const both = await d.snapshot({ openProjects: [lib] });
+    await query(both.snapshot, lib);
+    for (const file of [index, main]) await d.call('getDefaultProjectForFile', { snapshot: both.snapshot, file });
+    await d.snapshot({ openFiles: [index] });
+    await d.snapshot({ closeFiles: [index] });
+    // With two projects that have the file as their own, it belongs to the first project that has it at all.
+    const other = join(dir, 'lib/tsconfig.other.json');
+    const three = await d.snapshot({ openProjects: [other] });
+    await d.call('getSourceFileNames', { snapshot: three.snapshot, project: other });
+    await d.call('getDefaultProjectForFile', { snapshot: three.snapshot, file: index });
+    // Without them, to the first project that loads it as a source of a referenced project.
+    const closed = await d.snapshot({ closeProjects: [lib, other] });
+    await d.call('getDefaultProjectForFile', { snapshot: closed.snapshot, file: index });
+  } finally {
+    await d.close();
+  }
+  console.log(`compared ${d.count} responses`);
+  report(d);
+});
+
 // File contents are kept across snapshots: an edit is seen once the client reports the file, its real
 // path (for a file read through a symbolic link in node_modules) or invalidateAll.
 test(

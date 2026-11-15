@@ -92,7 +92,7 @@ import {
 import { decodeNodes } from '../compiler/decoder.js';
 import { type Diagnostic as CompilerDiagnostic, Locale } from '../compiler/diagnostics.js';
 import { encodeNode, encodeSourceFile as encodeFile, NodeIndexTable } from '../compiler/encoder.js';
-import { CompilerHost } from '../compiler/file-loader.js';
+import { CompilerHost, FileLoader } from '../compiler/file-loader.js';
 import { CachedFileSystem, DirectoryEntries, FileSystem } from '../compiler/file-system.js';
 import { signatureToSignatureDeclaration, typeToStringFromTypeNode, typeToTypeNode } from '../compiler/node-builder.js';
 import {
@@ -274,7 +274,9 @@ export class Project {
 
   private static load(config: ParsedCommandLine, host: ProjectHost, configSeen: readonly string[]): Project {
     const fs = new CachedFileSystem(new HostFileSystem(host));
-    const program = new Program(config, projectCompilerHost(fs, host));
+    const compilerHost = projectCompilerHost(fs, host);
+    // A project loads the sources of the projects it references, as tsgo's project service creates its programs.
+    const program = new Program(config, compilerHost, new FileLoader(compilerHost, config, true));
     return new Project(config, configSeen, new CheckedProgram(program), fs, host);
   }
 
@@ -400,6 +402,11 @@ export class Project {
 
   sourceFileByPath(path: string): SourceFile | undefined {
     return this.program.getSourceFileByPath(path);
+  }
+
+  /** Whether the program has the file at `path` as a source of a project its config references. */
+  isSourceFromProjectReference(path: string): boolean {
+    return this.program.isSourceFromProjectReference(path);
   }
 
   sourceFileMetadata(file: SourceFile): SourceFileMetadata {

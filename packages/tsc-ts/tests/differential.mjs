@@ -12,6 +12,8 @@ export class Differential {
     this.failures = [];
     // The snapshot `snapshot` makes the next one from.
     this.latestSnapshot = undefined;
+    // Whether a request has invalidated every file, after which tsc lists a config's file names in no fixed order.
+    this.invalidated = false;
     // Encoded source files by path, to name nodes.
     this.files = new Map();
   }
@@ -43,10 +45,12 @@ export class Differential {
       }
       const expected = JSON.parse(a.payload.toString());
       const actual = JSON.parse(b.payload.toString());
-      // After invalidateAll, tsc lists the files a config's patterns match in no fixed order.
-      if (params?.changes?.fileNotifications?.invalidateAll === true) {
+      // After invalidateAll, tsc lists the files a config's patterns match in no fixed order, in that reply and in
+      // each later one that carries a project.
+      if (params?.changes?.fileNotifications?.invalidateAll === true) this.invalidated = true;
+      if (this.invalidated) {
         for (const reply of [expected, actual]) {
-          for (const project of reply.projects ?? []) project.parsedCommandLine?.fileNames?.sort();
+          for (const project of reply?.projects ?? [reply]) project?.parsedCommandLine?.fileNames?.sort();
         }
       }
       if (returnsNodes(method)) {

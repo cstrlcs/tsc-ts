@@ -3,7 +3,7 @@
 // compared by what identifies them across processes: names, flags, node handles (index, kind and path)
 // and the text of types.
 import assert from 'node:assert/strict';
-import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import test from 'node:test';
@@ -188,6 +188,67 @@ test('programs and diagnostics are those of tsc --api', { skip, timeout: 300_000
     });
     assert.ok(named.getSourceFileNames().some((name) => name.endsWith('lib.es2024.d.ts')));
     assert.ok(named.getSourceFileNames().some((name) => name.endsWith('lib.dom.d.ts')));
+  } finally {
+    await tsgo.close();
+  }
+});
+
+test('a program loads the sources of referenced projects, as tsc --api does', { skip, timeout: 300_000 }, async () => {
+  const api = await load('library/index.js');
+  // A project that imports two projects it references by their declaration outputs, one by a relative path and one
+  // as a package linked into its node_modules, with neither built.
+  const dir = realpathSync(tempDir('tsc-ts-library-'));
+  cpSync(join(root, 'tests/fixtures/referenced-projects'), dir, { recursive: true });
+  mkdirSync(join(dir, 'app/node_modules'));
+  symlinkSync(join(dir, 'pkg'), join(dir, 'app/node_modules/pkg'));
+  const main = join(dir, 'app/src/main.ts');
+  const sources = [main, join(dir, 'lib/src/index.ts'), join(dir, 'lib/src/util.ts'), join(dir, 'pkg/src/index.ts')];
+  const tsgo = new Client([realTsc], dir);
+  try {
+    await tsgo.json('initialize');
+    for (const [name, files, codes] of [
+      ['tsconfig.json', sources, [2322, 2322]],
+      // Under preserveSymlinks, the linked package's output is found by its real path.
+      ['tsconfig.preserve.json', sources, [2322, 2322]],
+      // With disableSourceOfProjectReferenceRedirect, the outputs, which do not exist.
+      ['tsconfig.outputs.json', [main], [2307, 2307]],
+    ]) {
+      const config = join(dir, 'app', name);
+      const program = api.createProgramFromConfigFile(config, hostFor(join(dir, 'app')));
+      const update = await tsgo.snapshot({ openProjects: [config] });
+      const base = { snapshot: update.snapshot, project: config };
+      assert.deepEqual(program.getSourceFileNames(), await tsgo.json('getSourceFileNames', base), name);
+      const own = program.getSourceFileNames().filter((fileName) => fileName.startsWith(dir));
+      assert.deepEqual([...own].sort(), [...files].sort(), name);
+      for (const fileName of own)
+        assert.deepEqual(
+          program.getSourceFileMetadata(fileName),
+          await tsgo.json('getSourceFileMetadata', { ...base, file: fileName }),
+          fileName,
+        );
+      for (const kind of ['Program', 'Global', 'Syntactic', 'Bind', 'Semantic', 'Suggestion']) {
+        assert.deepEqual(
+          wire(program[`get${kind}Diagnostics`]()),
+          withoutPositions(await tsgo.json(`get${kind}Diagnostics`, base)),
+          `${name} ${kind}`,
+        );
+        if (kind === 'Program' || kind === 'Global') continue;
+        for (const fileName of own)
+          assert.deepEqual(
+            wire(program[`get${kind}Diagnostics`](program.getSourceFile(fileName))),
+            withoutPositions(await tsgo.json(`get${kind}Diagnostics`, { ...base, files: [fileName] })),
+            `${name} ${kind} ${fileName}`,
+          );
+      }
+      // The errors are those of the project's own file: a source of a referenced project is not checked.
+      const semantic = program.getSemanticDiagnostics();
+      assert.deepEqual(
+        semantic.map((d) => [d.fileName, d.code]),
+        codes.map((code) => [main, code]),
+        name,
+      );
+      program.dispose();
+    }
   } finally {
     await tsgo.close();
   }

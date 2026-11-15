@@ -7,6 +7,7 @@ import {
   ParseOptions,
   ScriptKind,
   StringLiteral,
+  Tristate,
   getText,
   type ExternalModuleIndicatorOptions,
   type FileReference,
@@ -15,11 +16,12 @@ import {
 } from './ast.js';
 import { Diagnostics, type DiagnosticMessage, type MessageWithArgs, messageWithArgs } from './diagnostics.js';
 import { FileIncludeKind, FileIncludeReason, IncludeProcessor, ProcessingDiagnostic } from './file-include.js';
-import type { FileSystem } from './file-system.js';
+import { CachedFileSystem, type DirectoryEntries, FileSystem } from './file-system.js';
 import { ModuleResolutionHost, Resolver, getAutomaticTypeDirectiveNames } from './module-resolution.js';
 import {
   getResolutionDiagnostic,
   inferredTypesContainingFile,
+  parseNodeModuleFromPath,
   type PackageId,
   type ResolvedModule,
   type ResolvedTypeReferenceDirective,
@@ -46,12 +48,15 @@ import { parseSourceFile, getScriptKindFromFileName } from './parser.js';
 import { mark } from './timeline.js';
 import {
   combinePaths,
+  containsPath,
+  ensureTrailingDirectorySeparator,
   fileExtensionIsOneOf,
   getCanonicalFileName,
   getDirectoryPath,
   getNormalizedAbsolutePath,
   getRootLength,
   hasJSFileExtension,
+  isDeclarationFileName,
   isRootedDiskPath,
   normalizePath,
   normalizeSlashes,
@@ -77,6 +82,7 @@ import {
   SourceFileMetadata,
 } from './program-utilities.js';
 import { SyntaxKind } from './syntax-kind.js';
+import { KnownDirectoryLink, containsIgnoredPath } from './symlinks.js';
 import { isSourcePhaseImport } from './ast-utilities.js';
 import { hasExtension } from './vfs-match.js';
 import { TokenFlags } from './types.js';
@@ -374,16 +380,48 @@ export class ProjectReferenceMapper {
   readonly referencesInConfigFile = new Map<string, readonly string[]>();
   readonly sourceToProjectReference = new Map<string, SourceOutputAndProjectReference>();
   readonly outputDtsToProjectReference = new Map<string, SourceOutputAndProjectReference>();
+  /** The declaration directories of referenced projects, as paths, when the program loads their sources. */
+  readonly dtsDirectories = new Set<string>();
   private readonly realpathDtsToSource = new Map<string, SourceOutputAndProjectReference | null>();
   /** Set while loading files, for symlink lookups. */
   loader: FileLoader | undefined = undefined;
 
-  constructor(readonly config: ParsedCommandLine) {}
+  constructor(
+    readonly config: ParsedCommandLine,
+    /**
+     * Whether the program loads the sources of referenced projects in place of their declaration outputs, as
+     * tsgo's project service asks for its programs (UseSourceOfProjectReference), unless the config sets
+     * `disableSourceOfProjectReferenceRedirect`.
+     */
+    readonly useSourceOfProjectReference: boolean,
+  ) {}
 
-  /** The declaration output to load instead of a source of a referenced project, or `''`. */
-  getParseFileRedirect(path: string): string {
+  /**
+   * The host modules are resolved through: `host`, or with the sources of referenced projects, a host for which
+   * the declaration outputs of the references exist where their sources do.
+   */
+  resolutionHost(host: ModuleResolutionHost): ModuleResolutionHost {
+    if (this.useSourceOfProjectReference && this.outputDtsToProjectReference.size !== 0)
+      return new ProjectReferenceDtsFakingHost(host, this);
+    return host;
+  }
+
+  /**
+   * The file to load instead of the file at `path`, or `''`: the declaration output of a source of a referenced
+   * project, or with the sources of referenced projects, the source of a declaration output.
+   */
+  getParseFileRedirect(path: string, fileName: string): string {
+    if (this.useSourceOfProjectReference) {
+      const source = this.outputDtsToProjectReference.get(path) ?? this.getSourceToDtsIfSymlink(path, fileName);
+      return source !== undefined ? source.source : '';
+    }
     const output = this.sourceToProjectReference.get(path);
     return output !== undefined ? output.outputDts : '';
+  }
+
+  /** Whether the file at `path` is a source of a referenced project that the program loads as such. */
+  isSourceFromProjectReference(path: string): boolean {
+    return this.useSourceOfProjectReference && this.sourceToProjectReference.has(path);
   }
 
   /** The referenced project whose options apply to a file. */
@@ -407,7 +445,7 @@ export class ProjectReferenceMapper {
     if (loader === undefined || this.config.options.preserveSymlinks !== true) return undefined;
     let result: SourceOutputAndProjectReference | undefined;
     if (fileName.includes('/node_modules/')) {
-      const realPath = loader.toPath(loader.host.realpath(fileName));
+      const realPath = loader.toPath(loader.resolver.host.realpath(fileName));
       if (realPath !== path) result = this.outputDtsToProjectReference.get(realPath);
     }
     this.realpathDtsToSource.set(path, result ?? null);
@@ -423,6 +461,164 @@ export class ProjectReferenceMapper {
       result.push(this.configToProjectReference.get(path));
     }
     return result;
+  }
+}
+
+/**
+ * The resolution host of a program that loads the sources of referenced projects, as tsgo's
+ * projectReferenceDtsFakingHost: the declaration outputs of the references, and the directories they are in, exist
+ * where the sources do, so an import of an output resolves whether the reference is built or not, and the program
+ * loads the source in its place (`getParseFileRedirect`).
+ */
+class ProjectReferenceDtsFakingHost extends ModuleResolutionHost {
+  private readonly currentDirectory: string;
+  private readonly fs: FileSystem;
+
+  constructor(host: ModuleResolutionHost, mapper: ProjectReferenceMapper) {
+    super();
+    this.currentDirectory = host.getCurrentDirectory();
+    this.fs = new CachedFileSystem(new ProjectReferenceDtsFakingFileSystem(host, mapper));
+  }
+
+  useCaseSensitiveFileNames(): boolean {
+    return this.fs.useCaseSensitiveFileNames;
+  }
+
+  getCurrentDirectory(): string {
+    return this.currentDirectory;
+  }
+
+  fileExists(path: string): boolean {
+    return this.fs.fileExists(path);
+  }
+
+  directoryExists(path: string): boolean {
+    return this.fs.directoryExists(path);
+  }
+
+  readFile(path: string): string | undefined {
+    return this.fs.readFile(path);
+  }
+
+  realpath(path: string): string {
+    return this.fs.realpath(path);
+  }
+
+  getDirectories(_path: string): readonly string[] {
+    throw new Error('should not be called by resolver');
+  }
+}
+
+/** The file system of a ProjectReferenceDtsFakingHost, which caches its answers. */
+class ProjectReferenceDtsFakingFileSystem extends FileSystem {
+  /** The real file names of declaration outputs found through symlinked packages, by path. */
+  private readonly knownFileSymlinks = new Map<string, string>();
+  /** The real directories of symlinked directories in `node_modules`, by path with a trailing `/`. */
+  private readonly knownDirectorySymlinks = new Map<string, KnownDirectoryLink>();
+
+  constructor(
+    private readonly host: ModuleResolutionHost,
+    private readonly mapper: ProjectReferenceMapper,
+  ) {
+    super(host.useCaseSensitiveFileNames());
+  }
+
+  fileExists(path: string): boolean {
+    if (this.host.fileExists(path)) return true;
+    if (!isDeclarationFileName(path)) return false;
+    // The declaration output of a referenced project exists if its source does.
+    return this.fileOrDirectoryExistsUsingSource(path, true);
+  }
+
+  directoryExists(path: string): boolean {
+    if (this.host.directoryExists(path)) {
+      this.handleDirectoryCouldBeSymlink(path);
+      return true;
+    }
+    return this.fileOrDirectoryExistsUsingSource(path, false);
+  }
+
+  /** As the host reads it: a declaration output that is not built has no text. */
+  readFile(path: string): string | undefined {
+    return this.host.readFile(path);
+  }
+
+  getAccessibleEntries(_path: string): DirectoryEntries {
+    throw new Error('should not be called by resolver');
+  }
+
+  realpath(path: string): string {
+    return this.knownFileSymlinks.get(this.toPath(path)) ?? this.host.realpath(path);
+  }
+
+  private toPath(fileName: string): string {
+    return toPath(fileName, this.host.getCurrentDirectory(), this.useCaseSensitiveFileNames);
+  }
+
+  /** Records `directory`, an existing directory inside `node_modules`, if it is a symlink. */
+  private handleDirectoryCouldBeSymlink(directory: string): void {
+    if (containsIgnoredPath(directory) || !directory.includes('/node_modules/')) return;
+    const directoryPath = ensureTrailingDirectorySeparator(this.toPath(directory));
+    if (this.knownDirectorySymlinks.has(directoryPath)) return;
+    const realDirectory = this.realpath(directory);
+    if (realDirectory === directory) return;
+    const realPath = ensureTrailingDirectorySeparator(this.toPath(realDirectory));
+    if (realPath === directoryPath) return;
+    this.knownDirectorySymlinks.set(
+      directoryPath,
+      new KnownDirectoryLink(ensureTrailingDirectorySeparator(realDirectory), realPath),
+    );
+  }
+
+  /**
+   * Whether `fileOrDirectory` is the declaration output of a referenced project whose source exists, or a directory
+   * of declaration outputs: at its own path or, inside `node_modules`, at its path through a symlinked package.
+   */
+  private fileOrDirectoryExistsUsingSource(fileOrDirectory: string, isFile: boolean): boolean {
+    const result = this.existsUsingSource(fileOrDirectory, isFile);
+    if (result !== Tristate.Unknown) return result === Tristate.True;
+
+    const fileOrDirectoryPath = this.toPath(fileOrDirectory);
+    if (!fileOrDirectoryPath.includes('/node_modules/')) return false;
+    const packageRoot = parseNodeModuleFromPath(fileOrDirectory, !isFile);
+    if (packageRoot !== '') this.handleDirectoryCouldBeSymlink(packageRoot);
+    if (this.knownDirectorySymlinks.size === 0) return false;
+    if (isFile && this.knownFileSymlinks.has(fileOrDirectoryPath)) return true;
+
+    for (const [directoryPath, link] of this.knownDirectorySymlinks) {
+      if (!fileOrDirectoryPath.startsWith(directoryPath)) continue;
+      const relative = fileOrDirectoryPath.length - directoryPath.length;
+      const absolute = getNormalizedAbsolutePath(fileOrDirectory, this.host.getCurrentDirectory());
+      const realFileOrDirectory = link.real + absolute.slice(absolute.length - relative);
+      if (this.existsUsingSource(realFileOrDirectory, isFile) !== Tristate.True) continue;
+      if (isFile) this.knownFileSymlinks.set(fileOrDirectoryPath, realFileOrDirectory);
+      return true;
+    }
+    return false;
+  }
+
+  private existsUsingSource(fileOrDirectory: string, isFile: boolean): Tristate {
+    return isFile
+      ? this.fileExistsIfProjectReferenceDts(fileOrDirectory)
+      : this.directoryExistsIfProjectReferenceDeclDir(fileOrDirectory);
+  }
+
+  private fileExistsIfProjectReferenceDts(file: string): Tristate {
+    const source = this.mapper.outputDtsToProjectReference.get(this.toPath(file));
+    if (source === undefined) return Tristate.Unknown;
+    return this.host.fileExists(source.source) ? Tristate.True : Tristate.False;
+  }
+
+  private directoryExistsIfProjectReferenceDeclDir(directory: string): Tristate {
+    const directoryPath = this.toPath(directory);
+    // A declaration directory, a directory that contains one, or a directory inside one.
+    for (const declarationDirectory of this.mapper.dtsDirectories)
+      if (
+        containsPath(directoryPath, declarationDirectory, true) ||
+        containsPath(declarationDirectory, directoryPath, true)
+      )
+        return Tristate.True;
+    return Tristate.Unknown;
   }
 }
 
@@ -623,9 +819,15 @@ export class FileLoader {
   // Whether a file's resolutions were taken from a parse thread.
   private tookPreparedResolutions = false;
 
+  /**
+   * With `useSourceOfProjectReference`, the program loads the sources of the projects its config references in
+   * place of their declaration outputs, built or not, as tsgo's ProgramOptions.UseSourceOfProjectReference: what
+   * its project service asks for and `tsc` does not.
+   */
   constructor(
     readonly host: CompilerHost,
     private readonly config: ParsedCommandLine,
+    useSourceOfProjectReference = false,
   ) {
     const options = config.options;
     this.options = options;
@@ -633,9 +835,15 @@ export class FileLoader {
     this.supportedExtensions = getSupportedExtensions(options);
     this.supportedExtensionsWithJson = getSupportedExtensionsWithJsonIfResolveJsonModule(options);
     this.maxNodeModuleJsDepth = options.maxNodeModuleJsDepth ?? 0;
-    this.mapper = new ProjectReferenceMapper(config);
+    this.mapper = new ProjectReferenceMapper(
+      config,
+      useSourceOfProjectReference && options.disableSourceOfProjectReferenceRedirect !== true,
+    );
     this.loadProjectReferences();
-    this.resolver = new Resolver(host, options);
+    const resolutionHost = this.mapper.resolutionHost(host);
+    this.resolver = new Resolver(resolutionHost, options);
+    // A parse thread resolves the imports of a file without the declaration outputs this host adds.
+    if (resolutionHost !== host) this.takesPreparedResolutions = false;
   }
 
   toPath(fileName: string): string {
@@ -911,6 +1119,11 @@ export class FileLoader {
         for (const [output, reference] of resolved.outputDtsToProjectReference()) {
           this.mapper.outputDtsToProjectReference.set(output, reference);
         }
+        if (this.mapper.useSourceOfProjectReference) {
+          let declarationDir = resolved.options.declarationDir ?? '';
+          if (declarationDir === '') declarationDir = resolved.options.outDir ?? '';
+          if (declarationDir !== '') this.mapper.dtsDirectories.add(this.toPath(declarationDir));
+        }
       }
       this.mapper.referencesInConfigFile.set(path, this.mapProjectReferences(task.subTasks, seen));
     }
@@ -1180,7 +1393,7 @@ export class FileLoader {
       return;
     }
     if (task.failedLookup) return;
-    const redirect = this.mapper.getParseFileRedirect(task.path);
+    const redirect = this.mapper.getParseFileRedirect(task.path, task.normalizedFilePath);
     if (redirect !== '') {
       const redirected = new ParseTask(
         normalizePath(redirect),
@@ -1602,7 +1815,8 @@ export class FileLoader {
 
         const redirected = task.redirectedParseTask;
         if (redirected !== undefined) {
-          outputFileToProjectReferenceSource.set(redirected.path, task.normalizedFilePath);
+          if (!this.mapper.useSourceOfProjectReference)
+            outputFileToProjectReferenceSource.set(redirected.path, task.normalizedFilePath);
           continue;
         }
         if (task.isForAutomaticTypeDirective) {

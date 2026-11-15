@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "preserveSymlinks": true },
+  "references": [{ "path": "../lib" }, { "path": "../pkg" }]
+}

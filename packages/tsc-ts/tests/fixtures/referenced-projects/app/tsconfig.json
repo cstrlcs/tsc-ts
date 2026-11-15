@@ -1,0 +1,5 @@
+{
+  "compilerOptions": { "strict": true, "module": "nodenext", "types": [], "noEmit": true },
+  "include": ["src"],
+  "references": [{ "path": "../lib" }, { "path": "../pkg" }]
+}

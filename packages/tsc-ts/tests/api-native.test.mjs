@@ -3,7 +3,7 @@
 // signatures and text at every node). api-library.test.mjs compares the Node build's answers with tsc --api's.
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { closeSync, cpSync, existsSync, openSync, readFileSync, realpathSync } from 'node:fs';
+import { closeSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, symlinkSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
 import { compileOptions, compiledDir, tempDir } from './temp.mjs';
@@ -49,14 +49,20 @@ test('a native build of tsc-ts/api answers as the Node build', { skip, timeout: 
     `${build.error === undefined ? '' : build.error.message + '\n'}${readFileSync(log, 'utf8')}`,
   );
 
-  // The library fixture (more than 4,000 answers), and one whose files and config file have errors.
-  for (const [fixture, minimum] of [
-    ['library', 4000],
-    ['library-errors', 50],
+  // The library fixture (more than 4,000 answers), one whose files and config file have errors, and a project
+  // that loads the sources of the projects it references, one of them a package linked into its node_modules.
+  for (const [fixture, minimum, configName] of [
+    ['library', 4000, 'tsconfig.json'],
+    ['library-errors', 50, 'tsconfig.json'],
+    ['referenced-projects', 300, 'app/tsconfig.json'],
   ]) {
     const dir = tempDir('tsc-ts-api-native-');
     cpSync(join(root, 'tests/fixtures', fixture), dir, { recursive: true });
-    const config = join(dir, 'tsconfig.json');
+    if (fixture === 'referenced-projects') {
+      mkdirSync(join(dir, 'app/node_modules'));
+      symlinkSync(join(dir, 'pkg'), join(dir, 'app/node_modules/pkg'));
+    }
+    const config = join(dir, configName);
     const expected = answers(nodeProbe, config);
     const actual = answers([native], config);
     assert.ok(expected.length > minimum, `${expected.length} answers for ${fixture}`);

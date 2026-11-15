@@ -248,9 +248,12 @@ export class Program implements OutputPathsHost {
     return this.processed.libFiles.get(path);
   }
 
-  /** The declaration output loaded instead of a source of a referenced project, or `''`. */
+  /**
+   * The file loaded instead of `fileName`, or `''`: the declaration output of a referenced project's source, or
+   * the source of its declaration output when the program uses the sources of project references.
+   */
   getParseFileRedirect(fileName: string): string {
-    return this.processed.projectReferenceMapper.getParseFileRedirect(this.toPath(fileName));
+    return this.processed.projectReferenceMapper.getParseFileRedirect(this.toPath(fileName), fileName);
   }
 
   /** Files the type reference directives of a file resolved to. */
@@ -395,6 +398,11 @@ export class Program implements OutputPathsHost {
 
   getProjectReferenceFromSource(path: string): SourceOutputAndProjectReference | undefined {
     return this.processed.projectReferenceMapper.sourceToProjectReference.get(path);
+  }
+
+  /** Whether `path` is a source of a referenced project, loaded because the program uses the sources of references. */
+  isSourceFromProjectReference(path: string): boolean {
+    return this.processed.projectReferenceMapper.isSourceFromProjectReference(path);
   }
 
   /** The configs of the project's references; `undefined` for those that couldn't be read. */

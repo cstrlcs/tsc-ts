@@ -1952,10 +1952,23 @@ function unloadUnusedProjects(state: SnapshotState): void {
   for (const id of Array.from(state.loaded.keys())) if (!used.has(id)) state.loaded.delete(id);
 }
 
-// The project a file belongs to: the first configured project that has it, else the inferred project if it has it.
+// The project a file belongs to, among the configured projects that have it: the one that has it as a file of its
+// own when the others have it as a source of a project they reference, else the first, as tsgo's GetDefaultProject
+// chooses where no file is open; the inferred project if no configured project has it.
 function defaultProject(snapshot: SnapshotData, path: string): LoadedProject | undefined {
-  for (const p of snapshot.projects) if (containsFile(p, path)) return p;
-  return undefined;
+  let first: LoadedProject | undefined;
+  let direct: LoadedProject | undefined;
+  let directCount = 0;
+  for (const p of snapshot.projects) {
+    if (!containsFile(p, path)) continue;
+    // The inferred project comes last, and counts only when no configured project has the file.
+    if (p.inferred && first !== undefined) break;
+    first ??= p;
+    if (p.project.isSourceFromProjectReference(path)) continue;
+    direct ??= p;
+    directCount += 1;
+  }
+  return directCount === 1 ? direct : first;
 }
 
 function sameStrings(a: readonly string[], b: readonly string[]): boolean {

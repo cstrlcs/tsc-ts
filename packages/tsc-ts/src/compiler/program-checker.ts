@@ -451,7 +451,7 @@ export class CheckedProgram {
       (!ignoreNoCheck && options.noCheck === true) ||
       (options.skipLibCheck === true && file.isDeclarationFile) ||
       (options.skipDefaultLibCheck === true && this.program.isSourceFileDefaultLibrary(file.path)) ||
-      this.program.getProjectReferenceFromSource(file.path) !== undefined ||
+      this.program.isSourceFromProjectReference(file.path) ||
       !canIncludeBindAndCheckDiagnostics(file, options)
     );
   }

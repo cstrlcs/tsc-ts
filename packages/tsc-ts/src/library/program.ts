@@ -8,6 +8,7 @@ import { CheckedProgram } from '../compiler/compile-program.js';
 import type { SourceFile as CompilerSourceFile } from '../compiler/ast.js';
 import { dropLibGlobals } from '../compiler/checker-symbols.js';
 import type { Diagnostic as CompilerDiagnostic } from '../compiler/diagnostics.js';
+import { FileLoader } from '../compiler/file-loader.js';
 import { CachedFileSystem } from '../compiler/file-system.js';
 import { getBaseFileName, getNormalizedAbsolutePath } from '../compiler/path.js';
 import { Program as CompilerProgram, sortAndDeduplicateDiagnostics } from '../compiler/program.js';
@@ -59,8 +60,10 @@ export function createProgram(options: CreateProgramOptions): Program {
 }
 
 /**
- * The program of a config file (`parseConfigFile`'s options and files), reading files through `host`. It takes the
- * parsed files of `oldProgram` that are unchanged, as `createProgram` does.
+ * The program of a config file (`parseConfigFile`'s options and files), reading files through `host`. As the
+ * projects of `tsc --api`, it loads the sources of the projects the config references in place of their declaration
+ * outputs, unless the config sets `disableSourceOfProjectReferenceRedirect`. It takes the parsed files of
+ * `oldProgram` that are unchanged, as `createProgram` does.
  */
 export function createProgramFromConfigFile(configFileName: string, host: ProgramHost, oldProgram?: Program): Program {
   const old = compilerProgramOf(oldProgram);
@@ -123,7 +126,8 @@ function programOf(config: ParsedCommandLine, host: ProgramHost, oldProgram: Com
     host.getDefaultLibraryDirectory(),
     oldProgram,
   );
-  const program = new CompilerProgram(config, compilerHost);
+  // With the sources of referenced projects, as tsgo's project service creates the programs of `tsc --api`.
+  const program = new CompilerProgram(config, compilerHost, new FileLoader(compilerHost, config, true));
   compilerHost.releaseOldProgram();
   return new LibraryProgram(new CheckedProgram(program));
 }
