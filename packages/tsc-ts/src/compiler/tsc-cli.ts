@@ -3,9 +3,15 @@
  * tsconfig.json, `--showConfig`, program construction and `--listFilesOnly`.
  */
 import { mark } from './timeline.js';
-import { ContentMapperProjectSpec, type ContentMapperProject } from './content-mapper.js';
+import { ContentMapperProjectSpec, type ContentMapperProject, type ContentMapperTimings } from './content-mapper.js';
 import { ContentMapperProcessHost, type ProcessChannel, type ProcessSpawner } from './content-mapper-process-host.js';
-import { FileBuildInfoReader, readBuildInfoProgram, type Snapshot } from './incremental.js';
+import {
+  contentMapperIdentities,
+  type ContentMapperIdentities,
+  FileBuildInfoReader,
+  readBuildInfoProgram,
+  type Snapshot,
+} from './incremental.js';
 import {
   createCompilerDiagnostic,
   Diagnostics,
@@ -175,8 +181,15 @@ export type CommandLineResult =
       readonly parseTime: number;
       readonly reporter: DiagnosticReporter;
       readonly errorSummary: ErrorSummaryReporter;
-      /** The build info of an incremental program, read while threads parsed its files; `undefined` if not read yet. */
+      /**
+       * The build info of an incremental program, read while threads parsed its files or once it was loaded,
+       * with its content mappers running; `undefined` if not read yet.
+       */
       readonly buildInfo?: EarlyBuildInfo;
+      /** The identities of the program's content mappers, for the build info it writes; `undefined` if it writes none. */
+      readonly contentMapperIdentities?: ContentMapperIdentities;
+      /** What the content mappers did while the program loaded, for `--diagnostics`; `undefined` without mappers to run. */
+      readonly contentMapperTimes?: ContentMapperTimings;
       /** How the run is configured: parse threads, checker count and sharing (run-config.ts). */
       readonly config: RunConfig;
     }
@@ -442,29 +455,67 @@ function executeCompile(sys: System, commandLine: ParsedCommandLine): CommandLin
 
   const parseStart = performance.now();
   let buildInfo: EarlyBuildInfo | undefined = undefined;
-  const createHost = (): CompilerHost => new SystemCompilerHost(sys, fs, locale, contentMapperProjectOf(sys, config));
+  // The content mappers of the compile, which run until it has loaded its last program (`closeContentMappers`).
+  const contentMapperHost = newContentMapperHost(sys, config.options);
+  const contentMapperProject = contentMapperProjectOf(contentMapperHost, config);
+  const closeContentMappers = (): void => {
+    contentMapperProject?.close();
+  };
+  const createHost = (): CompilerHost => new SystemCompilerHost(sys, fs, locale, contentMapperProject);
+  /**
+   * Reads the build info of the incremental program, which is compared with the content mappers as they run,
+   * and returns the time that took.
+   */
+  const readBuildInfo = (): number => {
+    const readStart = performance.now();
+    const snapshot = readBuildInfoProgram(
+      config,
+      new FileBuildInfoReader(new SystemFileSystem(sys)),
+      sys.defaultLibraryPath,
+      sys.currentDirectory,
+      contentMapperProject,
+    );
+    const readTime = performance.now() - readStart;
+    buildInfo = new EarlyBuildInfo(snapshot, readTime);
+    return readTime;
+  };
   const createProgram = (host: CompilerHost = createHost(), loader?: FileLoader): CommandLineResult => {
+    const incremental = isIncremental(config.options);
+    // As tsgo, the build info is read before the program is loaded, unless it was read while threads parsed:
+    // a mapper with configuration of its own is asked who it is for that, and says then what it makes of
+    // its options, which the program reports.
+    const readTime = incremental && buildInfo === undefined ? readBuildInfo() : 0;
     mark('program start');
     const program = new Program(config, host, loader);
-    // The program is loaded: its content mappers stop.
-    host.closeContentMappers();
     mark(`program built, ${program.getSourceFiles().length} files`);
-    const parseTime = performance.now() - parseStart;
-    reportPreparedFiles(program.getSourceFiles().map((f) => f.fileName));
+    const parseTime = performance.now() - parseStart - readTime;
     // Statistics need checking and emit timings.
     const statistics = config.options.diagnostics === true || config.options.extendedDiagnostics === true;
-    if (config.options.listFilesOnly === true && !statistics) {
+    const lists = config.options.listFilesOnly === true;
+    // The program is loaded. What its content mappers did so far is taken for the statistics, and then their
+    // identities for the build info the program writes, which one that only lists its files does not. The
+    // host lets go of the mappers: a program shared with other threads holds only data.
+    const contentMapperTimes = contentMapperHost?.timings();
+    const identities =
+      incremental && !lists && config.buildInfoFileName() !== ''
+        ? contentMapperIdentities(contentMapperProject)
+        : undefined;
+    host.contentMapperProject = undefined;
+    reportPreparedFiles(program.getSourceFiles().map((f) => f.fileName));
+    if (lists && !statistics) {
       return exit(listFilesOnly(sys, program, locale, reporter, errorSummary));
     }
     return {
       kind: 'compile',
       program,
-      incremental: isIncremental(config.options),
+      incremental,
       configTime,
       parseTime,
       reporter,
       errorSummary,
       buildInfo,
+      contentMapperIdentities: identities,
+      contentMapperTimes,
       config: runConfigOf(config.options),
     };
   };
@@ -514,28 +565,23 @@ function executeCompile(sys: System, commandLine: ParsedCommandLine): CommandLin
             isIncremental(config.options) &&
             !result.program.hasAllPackageJsonLookups()
           ) {
-            // A host of its own: the first one closed its content mappers.
+            // A host of its own: the first one let go of the content mappers.
             const ownHost = createHost();
             const own = new FileLoader(ownHost, config);
             own.takesPreparedResolutions = false;
             result = createProgram(ownHost, own);
           }
+          closeContentMappers();
           done(result);
           // The session's callbacks keep the loader: its tasks go once checking has started.
           releaseLater(loader);
         });
         // The build info of an incremental program is read while the threads parse: reading it needs
-        // only the config (compile and recheckInParallel, tsc-compile.ts, take it from here).
+        // only the config and the identities of its content mappers (compile and recheckInParallel,
+        // tsc-compile.ts, take it from here).
         if (isIncremental(config.options)) {
           if (sys.fileExists(config.buildInfoFileName())) session.queueAhead();
-          const readStart = performance.now();
-          const snapshot = readBuildInfoProgram(
-            config,
-            new FileBuildInfoReader(new SystemFileSystem(sys)),
-            sys.defaultLibraryPath,
-            sys.currentDirectory,
-          );
-          buildInfo = new EarlyBuildInfo(snapshot, performance.now() - readStart);
+          readBuildInfo();
           mark('build info read');
         }
       },
@@ -548,25 +594,37 @@ function executeCompile(sys: System, commandLine: ParsedCommandLine): CommandLin
     checkerThreads(config.options.checkers, config.options.singleThreaded) > 1
   )
     assignSymbolIdsAtCreation();
-  return createProgram();
+  const result = createProgram();
+  closeContentMappers();
+  return result;
 }
 
 /**
- * The content mappers of `config` for the host of its program, each run as the process its package declares,
- * which `sys` starts with the first file it transforms; `undefined` without `--runExternalCode`, which the
- * config's mappers need to be read at all, and for a project without content mappers. The host closes them
- * (`CompilerHost.closeContentMappers`). With the environment variable `TS_CONTENT_MAPPER_DEBUG` set, the
- * messages exchanged with the mappers and what they write to standard error go to standard error, as in tsgo.
+ * The host that runs content mappers for a compile, a build or a watch whose options are `options`, each
+ * mapper as the process its package declares, which `sys` starts with the first request for it; `undefined`
+ * without `--runExternalCode`. Whoever creates the host closes it, or the projects it takes from it. With
+ * the environment variable `TS_CONTENT_MAPPER_DEBUG` set, the messages exchanged with the mappers and what
+ * they write to standard error go to standard error, as in tsgo.
  */
-function contentMapperProjectOf(sys: System, config: ProjectConfig): ContentMapperProject | undefined {
-  if (config.options.runExternalCode !== true || config.contentMappers.length === 0) return undefined;
+export function newContentMapperHost(sys: System, options: CompilerOptions): ContentMapperProcessHost | undefined {
+  if (options.runExternalCode !== true) return undefined;
   const logger =
     sys.getEnvironmentVariable('TS_CONTENT_MAPPER_DEBUG') !== ''
       ? (message: string): void => sys.writeError(message + '\n')
       : undefined;
-  return new ContentMapperProcessHost(sys, config.options.locale ?? '', logger).project(
-    new ContentMapperProjectSpec(config.configName, config.contentMappers, config.options),
-  );
+  return new ContentMapperProcessHost(sys, options.locale ?? '', logger);
+}
+
+/**
+ * The content mappers of `config` as `host` runs them, which whoever asks for them closes; `undefined`
+ * without a host and for a project without content mappers.
+ */
+function contentMapperProjectOf(
+  host: ContentMapperProcessHost | undefined,
+  config: ProjectConfig,
+): ContentMapperProject | undefined {
+  if (host === undefined || config.contentMappers.length === 0) return undefined;
+  return host.project(new ContentMapperProjectSpec(config.configName, config.contentMappers, config.options));
 }
 
 /** Root file tasks the main thread adds each time a parse thread returns a chunk (`FileLoader.addRootFiles`). */

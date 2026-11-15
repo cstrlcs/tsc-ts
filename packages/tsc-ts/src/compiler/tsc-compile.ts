@@ -14,16 +14,11 @@ import {
   PlainProgram,
   recordMetadataKinds,
 } from './compile-program.js';
-import { type Diagnostic, formattedReports, type Locale } from './diagnostics.js';
+import type { ContentMapperTimings } from './content-mapper.js';
+import { compareCodePoints, type Diagnostic, formattedReports, type Locale } from './diagnostics.js';
 import { EmitOnly, EmitResult } from './emitter.js';
 import { type CompilerOptions, getEmitDeclarations } from './options.js';
-import {
-  FileBuildInfoReader,
-  IncrementalProgram,
-  readBuildInfoProgram,
-  type Snapshot,
-  TimeStampHost,
-} from './incremental.js';
+import { IncrementalProgram, type Snapshot, TimeStampHost } from './incremental.js';
 import {
   checkerThreads,
   memoryLimit,
@@ -52,7 +47,6 @@ import {
   ExitStatus,
   outputLocale,
   type System,
-  SystemFileSystem,
 } from './tsc-cli.js';
 import { reportRunConfig, Source, type CheckSignals, type RunConfig, type RecordsReport } from './run-config.js';
 import { availableCpus } from './cgroup.js';
@@ -105,12 +99,13 @@ export function compile(sys: System, work: CompileWork): ExitStatus {
   const times = new CompileTimes();
   times.configTime = work.configTime;
   times.parseTime = work.parseTime;
+  times.contentMapperTimes = work.contentMapperTimes;
   const bindStart = performance.now();
   const checked = new CheckedProgram(program);
   times.bindTime = performance.now() - bindStart;
   let compilerProgram: CompilerProgram;
   if (work.incremental) {
-    const old = oldSnapshotOf(sys, work, times);
+    const old = oldSnapshotOf(work, times);
     // An incremental recheck on old build info checks the files a change affects, not the program:
     // a record's samples are full checks (`run-records.ts`).
     if (old !== undefined && work.config !== undefined) {
@@ -118,7 +113,7 @@ export function compile(sys: System, work: CompileWork): ExitStatus {
       work.config.recordsReason = 'incremental recheck';
     }
     const changesStart = performance.now();
-    compilerProgram = new IncrementalProgram(checked, times, old, new SystemTimeStamps(sys));
+    compilerProgram = incrementalProgramOf(sys, work, checked, times, old);
     times.changesComputeTime = performance.now() - changesStart;
   } else compilerProgram = new PlainProgram(checked, times);
   const result = emitFilesAndReportErrors(
@@ -133,22 +128,31 @@ export function compile(sys: System, work: CompileWork): ExitStatus {
   return emitStatusAndReportStatistics(sys, compilerProgram, result, work.config);
 }
 
-/** The old state of `work`'s incremental program: read while threads parsed its files, or now. */
-function oldSnapshotOf(sys: System, work: CompileWork, times: CompileTimes): Snapshot | undefined {
+/**
+ * The incremental program of `work` for its checked program and the old state `old`, with the identities
+ * its content mappers had while they ran, which its build info records.
+ */
+function incrementalProgramOf(
+  sys: System,
+  work: CompileWork,
+  checked: CheckedProgram,
+  times: CompileTimes,
+  old: Snapshot | undefined,
+): IncrementalProgram {
+  const program = new IncrementalProgram(checked, times, old, new SystemTimeStamps(sys));
+  if (work.contentMapperIdentities !== undefined) program.contentMapperIdentities = work.contentMapperIdentities;
+  return program;
+}
+
+/**
+ * The old state of `work`'s incremental program, which was read while threads parsed its files or once the
+ * program was loaded, while its content mappers ran to compare it with (tsc-cli.ts).
+ */
+function oldSnapshotOf(work: CompileWork, times: CompileTimes): Snapshot | undefined {
   const early = work.buildInfo;
-  if (early !== undefined) {
-    times.buildInfoReadTime = early.readTime;
-    return early.snapshot;
-  }
-  const readStart = performance.now();
-  const old = readBuildInfoProgram(
-    work.program.commandLine,
-    new FileBuildInfoReader(new SystemFileSystem(sys)),
-    sys.defaultLibraryPath,
-    sys.currentDirectory,
-  );
-  times.buildInfoReadTime = performance.now() - readStart;
-  return old;
+  if (early === undefined) return undefined;
+  times.buildInfoReadTime = early.readTime;
+  return early.snapshot;
 }
 
 /**
@@ -192,6 +196,7 @@ export function compileWithEmitThreads(
   const times = new CompileTimes();
   times.configTime = work.configTime;
   times.parseTime = work.parseTime;
+  times.contentMapperTimes = work.contentMapperTimes;
   const bindStart = performance.now();
   const checked = new CheckedProgram(program);
   times.bindTime = performance.now() - bindStart;
@@ -199,9 +204,9 @@ export function compileWithEmitThreads(
   shareWithCheckers(checked);
   let compilerProgram: CompilerProgram;
   if (work.incremental) {
-    const old = oldSnapshotOf(sys, work, times);
+    const old = oldSnapshotOf(work, times);
     const changesStart = performance.now();
-    compilerProgram = new IncrementalProgram(checked, times, old, new SystemTimeStamps(sys));
+    compilerProgram = incrementalProgramOf(sys, work, checked, times, old);
     times.changesComputeTime = performance.now() - changesStart;
   } else compilerProgram = new PlainProgram(checked, times);
   const report = (diagnostics: Diagnostic[]): void => {
@@ -341,6 +346,7 @@ export function compileWithDeclarationThread(
   const times = new CompileTimes();
   times.configTime = work.configTime;
   times.parseTime = work.parseTime;
+  times.contentMapperTimes = work.contentMapperTimes;
   const bindStart = performance.now();
   const checked = new CheckedProgram(program);
   times.bindTime = performance.now() - bindStart;
@@ -391,6 +397,7 @@ export function compileInParallel(
   const times = new CompileTimes();
   times.configTime = work.configTime;
   times.parseTime = work.parseTime;
+  times.contentMapperTimes = work.contentMapperTimes;
   const bindStart = performance.now();
   // The checker threads format their diagnostics in the format the reporter writes them in.
   formattedReports.format = work.reporter.plainFormat();
@@ -422,7 +429,7 @@ export function compileInParallel(
     let compilerProgram: CompilerProgram;
     if (work.incremental) {
       const changesStart = performance.now();
-      compilerProgram = new IncrementalProgram(checked, times, undefined, new SystemTimeStamps(sys));
+      compilerProgram = incrementalProgramOf(sys, work, checked, times, undefined);
       times.changesComputeTime = performance.now() - changesStart;
     } else compilerProgram = new PlainProgram(checked, times);
     mark('report start');
@@ -506,7 +513,7 @@ function recheckInParallel(
     work.config.records = false;
     work.config.recordsReason = 'incremental recheck';
   }
-  const old = oldSnapshotOf(sys, work, times);
+  const old = oldSnapshotOf(work, times);
   // The program is shared before its checker does more than merge the globals; the incremental program
   // compares the references of its files with the old state on as many threads as check.
   if (sharesPublishedGraphs) {
@@ -514,7 +521,7 @@ function recheckInParallel(
     checked.referenceThreads = threads;
   }
   const changesStart = performance.now();
-  const incrementalProgram = new IncrementalProgram(checked, times, old, new SystemTimeStamps(sys));
+  const incrementalProgram = incrementalProgramOf(sys, work, checked, times, old);
   times.changesComputeTime = performance.now() - changesStart;
   // `threadsCheckTime` is the wall time of checker threads that checked the affected files: the check
   // time reported (--diagnostics) is theirs and this thread's, which takes their diagnostics.
@@ -889,6 +896,8 @@ export class Statistics {
     if (t.checkTime !== 0) rows.push([prefix + 'Check time', formatDuration(t.checkTime)]);
     if (t.emitTime !== 0) rows.push([prefix + 'Emit time', formatDuration(t.emitTime)]);
     if (t.changesComputeTime !== 0) rows.push([prefix + 'Changes compute time', formatDuration(t.changesComputeTime)]);
+    const mapperTimes = t.contentMapperTimes;
+    if (mapperTimes !== undefined) for (const row of contentMapperStatistics(mapperTimes, prefix)) rows.push(row);
     rows.push([prefix + 'Total time', formatDuration(t.totalTime)]);
     let nameWidth = 0;
     let valueWidth = 0;
@@ -902,6 +911,31 @@ export class Statistics {
     }
     sys.write(out);
   }
+}
+
+/**
+ * The rows for what content mappers did: the time requests waited for them, and for each mapper that ran,
+ * by identity, the time to start and initialize it and the time of its requests of each kind.
+ */
+function contentMapperStatistics(timings: ContentMapperTimings, prefix: string): [string, string][] {
+  const rows: [string, string][] = [];
+  if (timings.requestWait !== 0)
+    rows.push([prefix + 'Content mapper request wait time', formatDuration(timings.requestWait)]);
+  for (const identity of Array.from(timings.mappers.keys()).sort(compareCodePoints)) {
+    const mapper = timings.mappers.get(identity)!;
+    if (mapper.spawn.count !== 0)
+      rows.push([
+        prefix + identity + ' initialization time',
+        formatDuration(mapper.spawn.duration + mapper.initialize.duration),
+      ]);
+    if (mapper.transform.count !== 0)
+      rows.push([prefix + identity + ' transform time', formatDuration(mapper.transform.duration)]);
+    if (mapper.openProject.count !== 0)
+      rows.push([prefix + identity + ' openProject time', formatDuration(mapper.openProject.duration)]);
+    if (mapper.closeProject.count !== 0)
+      rows.push([prefix + identity + ' closeProject time', formatDuration(mapper.closeProject.duration)]);
+  }
+  return rows;
 }
 
 function formatDuration(milliseconds: number): string {
@@ -935,6 +969,7 @@ export function statisticsOf(compilerProgram: CompilerProgram): Statistics {
   t.checkTime = source.checkTime;
   t.emitTime = source.emitTime;
   t.changesComputeTime = source.changesComputeTime;
+  t.contentMapperTimes = source.contentMapperTimes;
   t.totalTime = source.totalTime;
   return statistics;
 }

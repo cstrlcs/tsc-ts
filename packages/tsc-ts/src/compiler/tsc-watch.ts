@@ -6,6 +6,7 @@
 import type { ParsedBuildCommandLine, ParsedCommandLine as CommandLine } from './command-line.js';
 import { CheckedProgram, CompileTimes, ProgramEmitter } from './compile-program.js';
 import {
+  createCompilerDiagnostic,
   type Diagnostic,
   type DiagnosticMessage,
   Diagnostics,
@@ -14,6 +15,8 @@ import {
   type MessageWithArgs,
 } from './diagnostics.js';
 import { type ExternalModuleIndicatorOptions, ParseOptions, ScriptKind, type SourceFile } from './ast.js';
+import { ContentMapperProjectSpec, type ContentMapperProject } from './content-mapper.js';
+import type { ContentMapperProcessHost } from './content-mapper-process-host.js';
 import { CompilerHost, FileLoader, releaseLater } from './file-loader.js';
 import { CachedFileSystem } from './file-system.js';
 import { clearLibGlobalsCache } from './checker-symbols.js';
@@ -23,6 +26,8 @@ import { forgetRangeScannerFile } from './binder-utilities.js';
 import { forgetIdentifierSets } from './printer/name-generator.js';
 import {
   computeLastSignatures,
+  contentMapperIdentities,
+  contentMapperProjectDiagnostic,
   declarationSignature,
   FileBuildInfoReader,
   IncrementalProgram,
@@ -36,6 +41,7 @@ import {
   DiagnosticReporter,
   type DirectoryWatch,
   ErrorSummaryReporter,
+  newContentMapperHost,
   outputLocale,
   rootFilesPerChunk,
   type System,
@@ -46,7 +52,13 @@ import { ParseSession, clearPreparedFiles, parallelParse, takePreparedFile } fro
 import { checkerThreads, shareWithCheckers, startParallelCheck } from './parallel-check.js';
 import { preParseConfig, type RunConfig } from './run-config.js';
 import { assignSymbolIdsAtCreation, symbolIdsAtCreation } from './symbol.js';
-import { Orchestrator, StatusReporter, startWatchRebuild } from './tsc-build.js';
+import {
+  BuildContentMappers,
+  Orchestrator,
+  sameContentMapperProject,
+  StatusReporter,
+  startWatchRebuild,
+} from './tsc-build.js';
 import { mark } from './timeline.js';
 import { emitFilesAndReportErrors, rechecksOnThreads, SystemTimeStamps, SystemWriter } from './tsc-compile.js';
 
@@ -309,8 +321,9 @@ class WatchCompilerHost extends CompilerHost {
     fs: CachedFileSystem,
     private readonly locale: Locale,
     private readonly files: WatchSourceFiles,
+    contentMapperProject: ContentMapperProject | undefined = undefined,
   ) {
-    super(fs, sys.currentDirectory, sys.defaultLibraryPath);
+    super(fs, sys.currentDirectory, sys.defaultLibraryPath, contentMapperProject);
   }
 
   getSourceFile(
@@ -457,6 +470,21 @@ class Watcher {
   private checkPending = false;
   /** The first program's run configuration, which its rebuilds use too (run-config.ts). */
   private run: RunConfig | undefined = undefined;
+  /**
+   * The host that runs the project's content mappers: one for the watch, so that a mapper starts once and
+   * runs from one build to the next; `undefined` without `--runExternalCode`.
+   */
+  private contentMapperHost: ContentMapperProcessHost | undefined = undefined;
+  /** The content mappers of `config` as the host runs them, replaced when the config is read again. */
+  private contentMapperProject: ContentMapperProject | undefined = undefined;
+  /** The files the mappers asked to have watched when the last program was loaded, and their time stamps. */
+  private contentMapperWatchedFiles: string[] = [];
+  private contentMapperStamps: Stamps;
+  /**
+   * Whether the mappers' projects could not be closed for a changed file they watch: the next build then
+   * loads the program again, whatever changed, as tsgo's does.
+   */
+  private contentMappersStale = false;
 
   constructor(
     private readonly sys: System,
@@ -474,11 +502,14 @@ class Watcher {
     );
     this.stamps = new Stamps(sys);
     this.configStamps = new Stamps(sys);
+    this.contentMapperStamps = new Stamps(sys);
     this.changes = new ChangeWatcher(sys, () => this.poll());
   }
 
   start(): void {
     const sys = this.sys;
+    this.contentMapperHost = newContentMapperHost(sys, this.config.options);
+    this.replaceContentMapperProject(this.config);
     this.status.report(
       watchRestart.resumed
         ? Diagnostics.File_change_detected_Starting_incremental_compilation
@@ -486,7 +517,7 @@ class Watcher {
     );
     const watchChanges = (): void => {
       watchRestart.firstBuildDone();
-      this.changes.watch([this.stamps, this.configStamps]);
+      this.changes.watch([this.stamps, this.configStamps, this.contentMapperStamps]);
     };
     const options = this.config.options;
     if (parallelParse.spawn !== undefined && options.singleThreaded !== true) {
@@ -502,8 +533,37 @@ class Watcher {
         new FileBuildInfoReader(new SystemFileSystem(sys)),
         sys.defaultLibraryPath,
         sys.currentDirectory,
+        this.contentMapperProject,
       );
     this.build(watchChanges);
+  }
+
+  /**
+   * Takes the content mappers of `config`, a new reading of the config file, from the watch's host and gives
+   * back those of the reading before, as tsgo's watcher does: mappers both readings have keep running.
+   */
+  private replaceContentMapperProject(config: ParsedCommandLine): void {
+    const host = this.contentMapperHost;
+    if (host === undefined) return;
+    const project = host.project(
+      new ContentMapperProjectSpec(config.configName, config.contentMappers, config.options),
+    );
+    this.contentMapperProject?.close();
+    this.contentMapperProject = project;
+  }
+
+  /**
+   * Notes the files the project's content mappers ask to have watched, before a program is loaded, as tsgo's
+   * watcher asks for them. A mapper with configuration of its own is started for the answer; if that fails,
+   * the failure is reported and no file is noted.
+   */
+  private askContentMapperWatchedFiles(): void {
+    this.contentMapperWatchedFiles = [];
+    const project = this.contentMapperProject;
+    if (project === undefined) return;
+    const files = project.watchedFiles();
+    if (Array.isArray(files)) this.contentMapperWatchedFiles = files;
+    else this.reporter.report(contentMapperProjectDiagnostic(files));
   }
 
   /**
@@ -536,7 +596,7 @@ class Watcher {
       config.fileNames.length > 0,
     );
     const fs = new CachedFileSystem(new SystemFileSystem(sys));
-    const host = new WatchCompilerHost(sys, fs, this.locale, new WatchSourceFiles());
+    const host = new WatchCompilerHost(sys, fs, this.locale, new WatchSourceFiles(), this.contentMapperProject);
     const loader = new FileLoader(host, config);
     let rootFilesAdded = false;
     // The build info lists the real paths of the `package.json` files module resolution looked up, as
@@ -562,11 +622,13 @@ class Watcher {
         new FileBuildInfoReader(new SystemFileSystem(sys)),
         sys.defaultLibraryPath,
         sys.currentDirectory,
+        this.contentMapperProject,
       );
       mark('build info read');
     };
     session.start(config.fileNames, () => {
       readBuildInfo();
+      this.askContentMapperWatchedFiles();
       let program = new Program(config, host, loader);
       // Where the threads' lookups may miss some `package.json` files of the build info, the program is
       // loaded again, resolving every file's imports and references itself, as a compile does.
@@ -575,6 +637,8 @@ class Watcher {
         own.takesPreparedResolutions = false;
         program = new Program(config, host, own);
       }
+      // The program is shared with the checker threads, and with it its host: the watch keeps the mappers.
+      host.contentMapperProject = undefined;
       // The session's callbacks keep the loader: its tasks go once checking has started.
       releaseLater(loader);
       this.files = this.files.next();
@@ -605,10 +669,18 @@ class Watcher {
     readBuildInfo();
   }
 
+  /**
+   * The files that say how the project is configured: its config file, the configs it extends, and the
+   * `package.json` of each of its content mappers, whose manifest the config is read with.
+   */
   private configFiles(): string[] {
     const configFile = this.config.configFile;
     if (configFile === undefined) return [];
-    return [configFile.sourceFile.fileName, ...configFile.extendedSourceFiles];
+    const files = [configFile.sourceFile.fileName, ...configFile.extendedSourceFiles];
+    for (const mapper of this.config.contentMappers)
+      if (mapper.packageDirectory !== '' && mapper.contributionId === '')
+        files.push(combinePaths(mapper.packageDirectory, 'package.json'));
+    return files;
   }
 
   private poll(): void {
@@ -620,7 +692,7 @@ class Watcher {
     this.building = true;
     this.rebuildIfChanged(() => {
       this.building = false;
-      this.changes.watch([this.stamps, this.configStamps]);
+      this.changes.watch([this.stamps, this.configStamps, this.contentMapperStamps]);
       if (this.checkPending) {
         this.checkPending = false;
         this.poll();
@@ -631,14 +703,33 @@ class Watcher {
   /** Rebuilds if inputs changed, then calls `done`. */
   private rebuildIfChanged(done: () => void): void {
     const configChanged = this.configStamps.changed();
-    if (!configChanged && !this.stamps.changed()) return done();
+    const mappersChanged = this.contentMapperStamps.changed();
+    if (!configChanged && !mappersChanged && !this.stamps.changed()) return done();
     // A changed config is read here, where errors in it keep the last one. A new process would read the
     // config again, so a process whose last read of it failed builds on with the config it has; after a
     // read that succeeded, a config change restarts the process like any other change.
     if (configChanged && !this.reloadConfig()) return done();
+    if (!configChanged) {
+      // For a change that is not of the config, tsgo's watcher asks the mappers for their watched files
+      // twice before it builds: to see whether the change matters, and what it is a change of. Mappers that
+      // run have answered; one that cannot start is reported each time.
+      this.askContentMapperWatchedFiles();
+      this.askContentMapperWatchedFiles();
+    }
     if (this.configRead && watchRestart.restartsBeforeRebuild()) return done();
+    // A file that content mappers asked to have watched changed: their projects close and open again with
+    // the next build, which loads the program again. tsgo's watcher does not build when that fails.
+    if (mappersChanged && this.contentMapperProject?.refresh() !== undefined) {
+      this.reporter.report(
+        createCompilerDiagnostic(Diagnostics.The_content_mapper_process_could_not_be_started_or_initialized),
+      );
+      this.contentMapperStamps.refresh(this.contentMapperWatchedFiles);
+      this.contentMappersStale = true;
+      return done();
+    }
     this.status.report(Diagnostics.File_change_detected_Starting_incremental_compilation);
-    this.build(done, configChanged ? undefined : this.stamps.changedFiles());
+    const loads = configChanged || mappersChanged || this.contentMappersStale;
+    this.build(done, loads ? undefined : this.stamps.changedFiles());
   }
 
   /** Rereads the config file; false (after reporting) if it can't be used. */
@@ -657,8 +748,23 @@ class Watcher {
       for (const file of this.configFiles()) this.configStamps.add(file);
       return false;
     }
+    this.replaceContentMapperProject(parsed);
     this.config = parsed;
     return true;
+  }
+
+  /**
+   * Takes `parsed`, the config file read again for the files it includes, as the config. It is the config
+   * the watch has unless the file changed since, so its content mappers are those that run: it takes the
+   * mapper objects of the config the watch has, which their project finds a file's mapper by. Mappers that
+   * are told something else of the project are replaced.
+   */
+  private takeFileNames(parsed: ParsedCommandLine): void {
+    if (this.contentMapperHost !== undefined) {
+      if (sameContentMapperProject(parsed, this.config)) parsed.contentMappers = this.config.contentMappers;
+      else this.replaceContentMapperProject(parsed);
+    }
+    this.config = parsed;
   }
 
   /**
@@ -680,11 +786,15 @@ class Watcher {
           this.commandLine.raw,
           [],
         );
-        if (parsed !== undefined) this.config = parsed;
+        if (parsed !== undefined) this.takeFileNames(parsed);
       }
       this.files = this.files.next();
+      this.askContentMapperWatchedFiles();
+      const host = new WatchCompilerHost(sys, fs, this.locale, this.files, this.contentMapperProject);
       // A copy: a program shared with checker threads holds its config's errors (`copyCommandLine`).
-      program = new Program(copyCommandLine(this.config), new WatchCompilerHost(sys, fs, this.locale, this.files));
+      program = new Program(copyCommandLine(this.config), host);
+      // The program may be shared with checker threads, and with it its host: the watch keeps the mappers.
+      host.contentMapperProject = undefined;
     }
     // The signatures the last build left as versions, for the files this one parsed.
     if (this.lastChecked !== undefined && this.snapshot !== undefined)
@@ -706,6 +816,9 @@ class Watcher {
    * must be loaded again. No directory and no config file changed, so the root files are the same. The
    * source files of the updated program are those of the next build (`WatchSourceFiles`), which takes the
    * unchanged ones without reading them.
+   *
+   * The program is loaded again for a file a content mapper produced, as in tsgo's watcher: a mapped file is
+   * transformed again, and a supplemental virtual file has the name of a file that must not be on disk.
    */
   private updatedProgram(changedFiles: readonly string[], fs: CachedFileSystem): Program | undefined {
     let program = this.lastProgram;
@@ -714,7 +827,7 @@ class Watcher {
     const host = new WatchCompilerHost(this.sys, fs, this.locale, files);
     for (const fileName of changedFiles) {
       const file = program.getSourceFile(fileName);
-      if (file === undefined) return undefined;
+      if (file === undefined || file.contentMapperIdentity() !== '') return undefined;
       program = program.updateFile(file.path, host);
       if (program === undefined) return undefined;
     }
@@ -795,11 +908,9 @@ class Watcher {
     done: () => void,
     changedFiles?: readonly string[],
   ): void {
-    const sys = this.sys;
     const program = checked.program;
     shareWithCheckers(checked);
-    const times = new CompileTimes();
-    const incremental = new IncrementalProgram(checked, times, this.snapshot, new SystemTimeStamps(sys), signatures);
+    const incremental = this.incrementalProgramOf(checked, signatures);
     const options = program.options;
     if (
       options.listFilesOnly !== true &&
@@ -842,11 +953,27 @@ class Watcher {
     signatures?: ReadonlyMap<string, string>,
     changedFiles?: readonly string[],
   ): void {
-    const times = new CompileTimes();
-    this.report(
-      new IncrementalProgram(checked, times, this.snapshot, new SystemTimeStamps(this.sys), signatures),
-      changedFiles,
+    this.report(this.incrementalProgramOf(checked, signatures), changedFiles);
+  }
+
+  /**
+   * The incremental program of `checked` and the last build's state, with the identities of the project's
+   * content mappers for the build info it writes.
+   */
+  private incrementalProgramOf(
+    checked: CheckedProgram,
+    signatures: ReadonlyMap<string, string> | undefined,
+  ): IncrementalProgram {
+    const incremental = new IncrementalProgram(
+      checked,
+      new CompileTimes(),
+      this.snapshot,
+      new SystemTimeStamps(this.sys),
+      signatures,
     );
+    if (checked.program.commandLine.buildInfoFileName() !== '')
+      incremental.contentMapperIdentities = contentMapperIdentities(this.contentMapperProject);
+    return incremental;
   }
 
   /**
@@ -885,8 +1012,12 @@ class Watcher {
     for (const fileName of this.config.fileNames) stamps.addDirectory(getDirectoryPath(fileName), false);
     for (const directory of includeDirectories(this.config)) stamps.addDirectory(directory.path, directory.recursive);
     if (this.config.configName === '') stamps.addDirectory(sys.currentDirectory, false);
+    const contentMapperStamps = new Stamps(sys);
+    for (const file of this.contentMapperWatchedFiles) contentMapperStamps.add(file);
     this.stamps = stamps;
     this.configStamps = configStamps;
+    this.contentMapperStamps = contentMapperStamps;
+    this.contentMappersStale = false;
   }
 }
 
@@ -940,14 +1071,18 @@ export function watchBuild(sys: System, command: ParsedBuildCommandLine): void {
       ? Diagnostics.File_change_detected_Starting_incremental_compilation
       : Diagnostics.Starting_compilation_in_watch_mode,
   );
+  // One host runs the content mappers of every rebuild, and a project keeps its mappers from one to the next.
+  const contentMappers = new BuildContentMappers(newContentMapperHost(sys, options));
   const run = (): Stamps => {
     releaseProgramCaches();
     startWatchRebuild();
-    const orchestrator = new Orchestrator(sys, command);
+    const orchestrator = new Orchestrator(sys, command, contentMappers);
     orchestrator.watching = true;
     orchestrator.start();
     status.reportErrorCount(orchestrator.errorCount);
-    return buildInputs(sys, command);
+    const stamps = buildInputs(sys, command);
+    for (const file of orchestrator.keepContentMappers()) stamps.add(file);
+    return stamps;
   };
   let stamps = run();
   watchRestart.firstBuildDone();

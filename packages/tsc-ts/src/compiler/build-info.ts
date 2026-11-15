@@ -98,6 +98,9 @@ export class BuildInfoDiagnostic {
   end = 0;
   code = 0;
   category = 0;
+  /** The prefix of the code and the text of a diagnostic an external source reported; `''` otherwise. */
+  source = '';
+  messageText = '';
   messageKey = '';
   messageArgs: string[] = [];
   messageChain: BuildInfoDiagnostic[] = [];
@@ -173,6 +176,11 @@ export class BuildInfo {
   root: BuildInfoRoot[] = [];
   packageJsons: string[] = [];
   missingPackageJsons: string[] = [];
+  /**
+   * The identity of each content mapper of the project when the build info was written, in the order of the
+   * config; `undefined` for a project built without content mappers to run.
+   */
+  contentMapperIdentities: string[] | undefined = undefined;
   fileNames: string[] = [];
   fileInfos: BuildInfoFileInfo[] = [];
   fileIdsList: number[][] = [];
@@ -198,6 +206,19 @@ export class BuildInfo {
 
   isIncremental(): boolean {
     return this.fileNames.length !== 0;
+  }
+
+  /**
+   * Whether the content mappers of the project have the identities `current`, as when the build info was
+   * written: the files of a mapper whose identity changed may be out of date. A project without mappers has
+   * none, whether or not it could run any.
+   */
+  contentMapperIdentitiesMatch(current: readonly string[] | undefined): boolean {
+    const recorded = this.contentMapperIdentities ?? [];
+    const identities = current ?? [];
+    if (recorded.length !== identities.length) return false;
+    for (let i = 0; i < recorded.length; i++) if (recorded[i] !== identities[i]) return false;
+    return true;
   }
 
   fileName(fileId: number): string {
@@ -398,6 +419,8 @@ function diagnosticJson(d: BuildInfoDiagnostic): string {
   if (d.end !== 0) w.add('end', String(d.end));
   if (d.code !== 0) w.add('code', String(d.code));
   if (d.category !== 0) w.add('category', String(d.category));
+  if (d.source !== '') w.add('source', quote(d.source));
+  if (d.messageText !== '') w.add('messageText', quote(d.messageText));
   if (d.messageKey !== '') w.add('messageKey', quote(d.messageKey));
   if (d.messageArgs.length > 0) w.add('messageArgs', stringArray(d.messageArgs));
   if (d.messageChain.length > 0) w.add('messageChain', diagnosticsJson(d.messageChain));
@@ -493,6 +516,8 @@ export function buildInfoToJson(b: BuildInfo): string {
   if (b.root.length > 0) w.add('root', listJson(b.root, rootJson));
   if (b.packageJsons.length > 0) w.add('packageJsons', stringArray(b.packageJsons));
   if (b.missingPackageJsons.length > 0) w.add('missingPackageJsons', stringArray(b.missingPackageJsons));
+  // As tsgo writes it: left out without a list, and written for a list without identities.
+  if (b.contentMapperIdentities !== undefined) w.add('contentMapperIdentities', stringArray(b.contentMapperIdentities));
   if (b.fileNames.length > 0) w.add('fileNames', stringArray(b.fileNames));
   if (b.fileInfos.length > 0) w.add('fileInfos', listJson(b.fileInfos, fileInfoJson));
   if (b.fileIdsList.length > 0) {
@@ -645,6 +670,12 @@ function readDiagnostic(value: JsonValue): BuildInfoDiagnostic {
       case 'category':
         d.category = asNumber(v);
         break;
+      case 'source':
+        d.source = asString(v);
+        break;
+      case 'messageText':
+        d.messageText = asString(v);
+        break;
       case 'messageKey':
         d.messageKey = asString(v);
         break;
@@ -751,6 +782,9 @@ function readBuildInfoField(b: BuildInfo, key: string, v: JsonValue): void {
     case 'missingPackageJsons':
       b.missingPackageJsons = stringsOf(v);
       break;
+    case 'contentMapperIdentities':
+      b.contentMapperIdentities = stringsOf(v);
+      break;
     case 'fileNames':
       b.fileNames = stringsOf(v);
       break;
@@ -821,6 +855,8 @@ const diagnosticKeys = new Map<string, number>(
     'end',
     'code',
     'category',
+    'source',
+    'messageText',
     'messageKey',
     'messageArgs',
     'messageChain',
@@ -1022,10 +1058,14 @@ class BuildInfoTextReader {
           else d.skippedOnNoEmit = value;
           break;
         }
+        case 'source':
+        case 'messageText':
         case 'messageKey': {
           const value = this.string();
           if (value === undefined) return undefined;
-          d.messageKey = value;
+          if (key === 'source') d.source = value;
+          else if (key === 'messageText') d.messageText = value;
+          else d.messageKey = value;
           break;
         }
         case 'messageArgs': {

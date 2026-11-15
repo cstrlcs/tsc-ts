@@ -4,7 +4,7 @@
  * `.tsbuildinfo` that stores it, like tsgo's `incremental` package.
  *
  * ```ts
- * const old = readBuildInfoProgram(config, reader, defaultLibraryPath);
+ * const old = readBuildInfoProgram(config, reader, defaultLibraryPath, currentDirectory, contentMapperProject);
  * const program = new IncrementalProgram(checked, times, old, host);
  * ```
  */
@@ -44,6 +44,7 @@ import {
   getImportAttributesTypeForModuleSpecifier,
 } from './checker-modules.js';
 import { getSymbolAtLocation } from './checker-services.js';
+import { InitializeError, type ContentMapperProject, type ProjectFailure } from './content-mapper.js';
 import { resolveAlias } from './checker-symbols.js';
 import {
   CompilerProgram,
@@ -58,14 +59,18 @@ import {
 import {
   categoryName,
   createCompilerDiagnostic,
+  createExternalDiagnostic,
   Diagnostic,
+  type DiagnosticFile,
   Diagnostics,
   messageForKey,
   messageKey,
+  noMessage,
   RepopulateKind,
   type RepopulateInfo,
 } from './diagnostics.js';
 import { EmitOnly, EmitResult, skippedWrite, sourceFileMayBeEmitted } from './emitter.js';
+import { contentMapperInitializationDiagnostic, contentMapperProjectErrorDiagnostic } from './file-loader.js';
 import type { FileSystem } from './file-system.js';
 import { version } from './help.js';
 import { Affects, type OptionDeclaration } from './option-declarations.js';
@@ -199,18 +204,33 @@ class StoredDiagnostic {
         return result;
       }
     }
-    const message = messageForKey(d.messageKey);
-    if (message === undefined) return undefined;
     const diagnosticFile = fileForDiagnostic === undefined ? undefined : fileForDiagnostic.diagnosticFile();
-    const result = new Diagnostic(
-      diagnosticFile,
-      diagnosticFile === undefined ? d.pos : diagnosticFile.fromUtf8Offset(d.pos),
-      diagnosticFile === undefined ? d.end : diagnosticFile.fromUtf8Offset(d.end),
-      message,
-      d.messageArgs,
-    );
-    result.code = d.code;
-    result.category = d.category;
+    let result: Diagnostic;
+    if (d.source !== '' || d.messageText !== '') {
+      // An external diagnostic, whose range is in the original text of a file a content mapper produced.
+      const textFile = diagnosticFile === undefined ? undefined : diagnosticFile.originalTextFile();
+      result = createExternalDiagnostic(
+        diagnosticFile,
+        textFile === undefined ? d.pos : textFile.fromUtf8Offset(d.pos),
+        textFile === undefined ? d.end : textFile.fromUtf8Offset(d.end),
+        d.source,
+        d.category,
+        d.code,
+        d.messageText,
+      );
+    } else {
+      const message = messageForKey(d.messageKey);
+      if (message === undefined) return undefined;
+      result = new Diagnostic(
+        diagnosticFile,
+        diagnosticFile === undefined ? d.pos : diagnosticFile.fromUtf8Offset(d.pos),
+        diagnosticFile === undefined ? d.end : diagnosticFile.fromUtf8Offset(d.end),
+        message,
+        d.messageArgs,
+      );
+      result.code = d.code;
+      result.category = d.category;
+    }
     result.skippedOnNoEmit = d.skippedOnNoEmit;
     for (const chain of this.messageChain) result.addMessageChain(chain.toDiagnostic(program, fileForDiagnostic));
     for (const related of this.relatedInformation) {
@@ -899,7 +919,7 @@ export function computeLastSignatures(snapshot: Snapshot, last: CheckedProgram, 
     const info = snapshot.fileInfos.get(path);
     if (info === undefined || info.signature !== info.version) continue;
     const file = last.program.getSourceFileByPath(path);
-    if (file === undefined || file.isDeclarationFile || !sourceFileMayBeEmitted(file, options)) continue;
+    if (file === undefined || file.isDeclarationFile || !sourceFileMayBeEmitted(file, options, true)) continue;
     emitter ??= new ProgramEmitter(last);
     const signature = declarationSignature(emitter, file, options);
     if (signature !== '') info.signature = signature;
@@ -1049,15 +1069,58 @@ export class FileBuildInfoReader extends BuildInfoReader {
   }
 }
 
-/** The state recorded by the previous build, if it can be used. */
+/**
+ * The identities of the content mappers of a project (`ContentMapperProject.identities`), which its build
+ * info records, or why they could not be had.
+ */
+export class ContentMapperIdentities {
+  constructor(
+    /** `undefined` for a project without content mappers to run, whose build info has no list. */
+    readonly identities: readonly string[] | undefined,
+    readonly failure: ProjectFailure | undefined,
+  ) {}
+}
+
+const noContentMapperIdentities = new ContentMapperIdentities(undefined, undefined);
+
+/**
+ * The identities of the mappers of `project`, as tsgo's ContentMapperIdentities reads them: a mapper with
+ * configuration of its own is started and its project opened to learn its identity.
+ */
+export function contentMapperIdentities(project: ContentMapperProject | undefined): ContentMapperIdentities {
+  if (project === undefined) return noContentMapperIdentities;
+  const identities = project.identities();
+  return Array.isArray(identities)
+    ? new ContentMapperIdentities(identities, undefined)
+    : new ContentMapperIdentities(undefined, identities);
+}
+
+/**
+ * The diagnostic for a content mapper project that could not be used, as tsgo's
+ * ContentMapperProjectDiagnostic makes it: a mapper that could not be initialized is named, with the reason.
+ */
+export function contentMapperProjectDiagnostic(failure: ProjectFailure): Diagnostic {
+  return failure instanceof InitializeError
+    ? contentMapperInitializationDiagnostic('', failure)
+    : createCompilerDiagnostic(contentMapperProjectErrorDiagnostic(failure));
+}
+
+/**
+ * The state recorded by the previous build, if it can be used. `contentMapperProject` is the content
+ * mappers of the project as they now run: build info written with a mapper of another identity is not used,
+ * since the files that mapper produced may be out of date, nor is any when the identities cannot be had.
+ */
 export function readBuildInfoProgram(
   config: ParsedCommandLine,
   reader: BuildInfoReader,
   defaultLibraryPath: string,
   currentDirectory: string,
+  contentMapperProject: ContentMapperProject | undefined,
 ): Snapshot | undefined {
   const buildInfo = reader.readBuildInfo(config);
   if (buildInfo === undefined || !buildInfo.isValidVersion() || !buildInfo.isIncremental()) return undefined;
+  const mappers = contentMapperIdentities(contentMapperProject);
+  if (mappers.failure !== undefined || !buildInfo.contentMapperIdentitiesMatch(mappers.identities)) return undefined;
   return buildInfoToSnapshot(buildInfo, config, defaultLibraryPath, currentDirectory);
 }
 
@@ -1349,7 +1412,15 @@ function programToSnapshot(checked: CheckedProgram, oldSnapshot: Snapshot | unde
     const path = file.path;
     const prepared = preparedVersion(file);
     const reused = prepared !== '' ? prepared : (oldSnapshot?.versionsByFile.get(file) ?? '');
-    const version = reused !== '' ? reused : computeHash(file.text);
+    // The version of a file a content mapper produced is that of its original text and of the transform.
+    const version =
+      reused !== ''
+        ? reused
+        : computeHash(
+            file.contentMapperIdentity() !== ''
+              ? file.originalText + '\u0000' + file.contentMapperTransformIdentity()
+              : file.text,
+          );
     snapshot.versionsByFile.set(file, version);
     const impliedNodeFormat: number = program.sourceFileMetadata(path).impliedNodeFormat;
     const affectsGlobalScope = fileAffectsGlobalScope(file);
@@ -1585,7 +1656,7 @@ class AffectedFilesHandler {
   private hasUncomputedSignature(file: SourceFile): boolean {
     const options = this.snapshot.options;
     if (isIncremental(options) || this.updatedSignatures.has(file.path)) return false;
-    if (!sourceFileMayBeEmitted(file, options)) return false;
+    if (!sourceFileMayBeEmitted(file, options, true)) return false;
     if (this.program.isSourceFileFromExternalLibrary(file)) return false;
     const info = this.snapshot.fileInfos.get(file.path);
     return info !== undefined && info.signature === info.version;
@@ -2350,12 +2421,17 @@ class ToBuildInfo {
         const path = toPath(file.fileName, this.program.currentDirectory, this.program.useCaseSensitiveFileNames);
         if (path !== filePath) result.file = this.toFileId(path);
       }
-      // Build info positions are UTF-8 offsets, like tsgo's.
-      result.pos = file === undefined ? d.pos : file.toUtf8Offset(d.pos);
-      result.end = file === undefined ? d.end : file.toUtf8Offset(d.end);
+      // Build info positions are UTF-8 offsets, like tsgo's: for an external diagnostic, of the original text.
+      const textFile: DiagnosticFile | undefined =
+        file === undefined ? undefined : d.source !== '' ? file.originalTextFile() : file;
+      result.pos = textFile === undefined ? d.pos : textFile.toUtf8Offset(d.pos);
+      result.end = textFile === undefined ? d.end : textFile.toUtf8Offset(d.end);
       result.code = d.code;
       result.category = d.category;
-      result.messageKey = messageKey(d.message);
+      result.source = d.source;
+      result.messageText = d.messageText;
+      // An external diagnostic has no message, and so no key.
+      result.messageKey = d.message === noMessage ? '' : messageKey(d.message);
       result.messageArgs = d.args.slice();
       result.messageChain = this.toBuildInfoDiagnostics(filePath, d.messageChain);
       result.relatedInformation = this.toBuildInfoDiagnostics(filePath, d.relatedInformation);
@@ -2377,6 +2453,8 @@ class ToBuildInfo {
       result.end = stored.end;
       result.code = stored.code;
       result.category = stored.category;
+      result.source = stored.source;
+      result.messageText = stored.messageText;
       result.messageKey = stored.messageKey;
       result.messageArgs = stored.messageArgs;
       result.messageChain = this.storedToBuildInfoDiagnostics(d.messageChain);
@@ -2594,6 +2672,12 @@ export abstract class TimeStampHost {
 
 export class IncrementalProgram extends CompilerProgram {
   readonly snapshot: Snapshot;
+  /**
+   * The identities of the project's content mappers for the build info (`contentMapperIdentities`), which
+   * whoever loaded the program asks for while the mappers run, when the program writes build info: a program
+   * lets go of its mappers once it is loaded (`CompilerHost.contentMapperProject`).
+   */
+  contentMapperIdentities: ContentMapperIdentities = noContentMapperIdentities;
 
   /**
    * `signatures`: the shape signatures (`declarationSignature`) of files of this program that were
@@ -2774,6 +2858,8 @@ export class IncrementalProgram extends CompilerProgram {
       if (buildInfoResult !== undefined) {
         for (const d of buildInfoResult.diagnostics) result.diagnostics.push(d);
         for (const f of buildInfoResult.emittedFiles) result.emittedFiles.push(f);
+        // The emit of a `noEmit` program is that of its build info, skipped where it could not be written.
+        if (options.noEmit === true) result.emitSkipped = buildInfoResult.emitSkipped;
       }
       return result;
     }
@@ -2829,11 +2915,19 @@ export class IncrementalProgram extends CompilerProgram {
       }
     }
     if (!snapshot.buildInfoEmitPending) return undefined;
+    const result = new EmitResult();
+    // Build info cannot say which mappers produced its files when they do not say who they are.
+    const mappers = this.contentMapperIdentities;
+    if (mappers.failure !== undefined) {
+      result.emitSkipped = true;
+      result.diagnostics.push(contentMapperProjectDiagnostic(mappers.failure));
+      return result;
+    }
     const absolute = getNormalizedAbsolutePath(buildInfoFileName, program.currentDirectory);
     const buildInfo = new ToBuildInfo(snapshot, program, absolute).build();
+    if (mappers.identities !== undefined) buildInfo.contentMapperIdentities = mappers.identities.slice();
     const text = buildInfoToJson(buildInfo);
     const error = writer.write(buildInfoFileName, text, []);
-    const result = new EmitResult();
     if (error !== '' && error !== skippedWrite) {
       result.emitSkipped = true;
       result.diagnostics.push(

@@ -7,11 +7,16 @@
 // runs one of the mappers of content-mappers.mjs. `writeMapperLaunchers` writes an executable per mapper name
 // that runs this file, so that a compiler given their directory on PATH finds the mappers that tsgo's compiler
 // cases name by the `exec` of their package.json.
-import { chmodSync, writeFileSync } from 'node:fs';
+//
+// With the environment variable CONTENT_MAPPER_LOG naming a file, the process appends a line to it for each
+// request it gets (the mapper's name and the method): what a compiler asks of its mappers, for tests that
+// compare two compilers.
+import { appendFileSync, chmodSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   createTestMapperSpawner,
+  dynamicVerbatimMapper,
   failingMapper,
   lispMapper,
   supplementalDiagnosticsMapper,
@@ -19,6 +24,7 @@ import {
   supplementalMapper,
   supplementalModuleMapper,
   transformingMapper,
+  verbatimMapper,
 } from './content-mappers.mjs';
 
 const serverFile = fileURLToPath(import.meta.url);
@@ -26,6 +32,8 @@ const serverFile = fileURLToPath(import.meta.url);
 /** The names of the mappers a launcher is written for. */
 export const mapperNames = [
   transformingMapper,
+  verbatimMapper,
+  dynamicVerbatimMapper,
   failingMapper,
   lispMapper,
   supplementalMapper,
@@ -109,5 +117,23 @@ export function writeMapperLaunchers(directory, spanMapModule) {
 
 if (process.argv[1] === serverFile) {
   const [name, spanMapModule] = process.argv.slice(2);
-  serve(createTestMapperSpawner(await import(pathToFileURL(spanMapModule).href))([name]));
+  const handler = createTestMapperSpawner(await import(pathToFileURL(spanMapModule).href))([name]);
+  // A mapper ends with its input. Node.js on macOS does not see the end of a named pipe, which is what tsc-ts
+  // under Node.js gives a mapper, when a compiler that watches is killed: the process is then no longer the
+  // compiler's child, and ends for that.
+  const compiler = process.ppid;
+  setInterval(() => {
+    if (process.ppid !== compiler) process.exit(0);
+  }, 500).unref();
+  const log = process.env.CONTENT_MAPPER_LOG;
+  if (log === undefined) serve(handler);
+  else {
+    const note = (event) => appendFileSync(log, `${name} ${event}\n`);
+    serve({
+      handleRequest(method, params) {
+        note(method);
+        return handler.handleRequest(method, params);
+      },
+    });
+  }
 }

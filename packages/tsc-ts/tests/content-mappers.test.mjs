@@ -1,6 +1,6 @@
-// The content mappers of tsgo's compiler tests, ported in content-mappers.mjs. Every file that the upstream
-// cases named contentMapper*.ts give to a mapper, and inputs that reach the rest of each mapper, go to the port
-// and to tsgo's mapper (packages/tsgo/dist/contentmapper-oracle, built by `npm run build:oracle`). The raw
+// The content mappers of tsgo's compiler tests and the verbatim mappers of its build and watch tests, ported in
+// content-mappers.mjs. Every file that the upstream cases named contentMapper*.ts give to a mapper, and inputs
+// that reach the rest of each mapper, go to the port and to tsgo's mapper (packages/tsgo/dist/contentmapper-oracle, built by `npm run build:oracle`). The raw
 // responses are compared, and then what tsc-ts and tsgo make of them. The same inputs go to the port running as
 // a process (content-mapper-server.mjs), which tsgo's command line then runs through a launcher.
 import { test } from 'node:test';
@@ -13,6 +13,7 @@ import { createCases, runOracle } from './content-mapper-cases.mjs';
 import { createFrameReader, frame, mapperNames, writeMapperLaunchers } from './content-mapper-server.mjs';
 import {
   createTestMapperSpawner,
+  dynamicVerbatimMapper,
   failingMapper,
   lispMapper,
   supplementalDiagnosticsMapper,
@@ -20,6 +21,7 @@ import {
   supplementalMapper,
   supplementalModuleMapper,
   transformingMapper,
+  verbatimMapper,
 } from './content-mappers.mjs';
 import { parseTestCase } from './module-resolution-cases.mjs';
 import { compileSources, tempDir } from './temp.mjs';
@@ -166,6 +168,17 @@ function otherCases() {
     for (const content of ['', 'export const a = 1;\n', 'const é = "😀";']) cases.push(item(testMapper, content));
   for (const fileName of ['/src/a.vue', '/b.vue', '/src/c.vue', '/src/a.vue.ts'])
     cases.push(item(supplementalGlobalsMapper, 'component', { fileName }));
+  for (const content of ['', 'export const a = 1;\n', 'const é = "😀";']) cases.push(item(verbatimMapper, content));
+  // The mapper with configuration of its own: its identity and watched file follow the config file's name and
+  // its options, and its option diagnostic is its own.
+  const dynamic = (rest) => {
+    const base = item(dynamicVerbatimMapper, 'export const a = 1;\n', rest);
+    return { ...base, mapper: { ...base.mapper, dynamicConfig: true } };
+  };
+  for (const configFileName of ['/tsconfig.json', '/project/src/tsconfig.app.json', ''])
+    cases.push(dynamic({ configFileName }));
+  cases.push(dynamic({ options: { plugins: [{ name: 1 }] } }));
+  cases.push(dynamic({ options: { plugins: [{ name: 'x' }], other: [1, 'é'] } }));
   cases.push(item('no-such-mapper', 'export {};'));
   return cases;
 }

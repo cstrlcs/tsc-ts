@@ -3,6 +3,7 @@
  * the emit it does, like tsgo's `ProgramLike`.
  */
 import type { Node, SourceFile } from './ast.js';
+import type { ContentMapperTimings } from './content-mapper.js';
 import type { Diagnostic } from './diagnostics.js';
 import { EmitHost, EmitOnly, EmitResult, emitFiles, skippedWrite, sourceFileMayBeEmitted } from './emitter.js';
 import { Resolver } from './module-resolution.js';
@@ -104,6 +105,8 @@ export class CompileTimes {
   checkTime = 0;
   emitTime = 0;
   changesComputeTime = 0;
+  /** What the content mappers of the project did while its program loaded; `undefined` without mappers to run. */
+  contentMapperTimes: ContentMapperTimings | undefined = undefined;
   totalTime = 0;
 }
 

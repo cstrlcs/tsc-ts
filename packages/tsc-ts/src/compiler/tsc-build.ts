@@ -7,6 +7,14 @@ import { BuildInfo, isBuildInfoFileNameDefaultLibrary, parseBuildInfo } from './
 import type { ParsedBuildCommandLine } from './command-line.js';
 import { CheckedProgram, CompileTimes, OutputWriter } from './compile-program.js';
 import {
+  ContentMapperProjectSpec,
+  isSupportedVirtualExtension,
+  marshalCompilerOptions,
+  type ContentMapperProject,
+  type ProjectFailure,
+} from './content-mapper.js';
+import type { ContentMapperProcessHost } from './content-mapper-process-host.js';
+import {
   createCompilerDiagnostic,
   type Diagnostic,
   type DiagnosticMessage,
@@ -26,6 +34,9 @@ import { defaultIsPretty, version } from './help.js';
 import {
   BuildInfoReader,
   computeHash,
+  contentMapperIdentities,
+  type ContentMapperIdentities,
+  contentMapperProjectDiagnostic,
   fileInfoFromBuildInfo,
   IncrementalProgram,
   readBuildInfoProgram,
@@ -50,6 +61,7 @@ import {
   DiagnosticReporter,
   ErrorSummaryReporter,
   ExitStatus,
+  newContentMapperHost,
   outputLocale,
   System,
   SystemFileSystem,
@@ -187,8 +199,172 @@ class BuildTask {
   configTime = 0;
   /** The project's run configuration (run-config.ts), one per project of the build. */
   run: RunConfig | undefined = undefined;
+  /**
+   * The project's content mappers as the build's host runs them, from the first time the task needs them
+   * (`Orchestrator.contentMapperProjectOf`); `undefined` before, and for a project without content mappers.
+   */
+  contentMapperProject: ContentMapperProject | undefined = undefined;
+  /** Whether `contentMapperProject` was asked for. */
+  contentMapperProjectKnown = false;
+  /** Why the project's content mappers cannot be used, once something failed; the task then does not build. */
+  contentMapperProjectError: ProjectFailure | undefined = undefined;
+  /** The identities of the content mappers the program was loaded with, for its build info. */
+  contentMapperIdentities: ContentMapperIdentities | undefined = undefined;
+  /**
+   * Under `--watch`, the files the config was read from, with their time stamps when it was read: the config
+   * file, the configs it extends and the `package.json` of each content mapper.
+   */
+  configFileTimes: ReadonlyMap<string, number | undefined> | undefined = undefined;
 
   constructor(readonly config: string) {}
+}
+
+/** The content mappers of a project of `tsc -b -w` after a rebuild, which the next rebuild may take. */
+class KeptContentMappers {
+  constructor(
+    /** The project's config as the rebuild read it. */
+    readonly config: ParsedCommandLine,
+    readonly project: ContentMapperProject,
+    readonly error: ProjectFailure | undefined,
+    /** The files the config was read from, with their time stamps when it was read (`BuildTask.configFileTimes`). */
+    readonly configFiles: ReadonlyMap<string, number | undefined>,
+    /** The files the mappers asked to have watched, with their time stamps after the rebuild. */
+    readonly watchedFiles: ReadonlyMap<string, number | undefined>,
+  ) {}
+}
+
+/** Whether a file of `files` no longer has the time stamp it is listed with. */
+function anyFileChanged(sys: System, files: ReadonlyMap<string, number | undefined>): boolean {
+  for (const [fileName, time] of files) if (sys.getMTime(fileName) !== time) return true;
+  return false;
+}
+
+/** The time stamp of each of `fileNames`. */
+function timeStampsOf(sys: System, fileNames: readonly string[]): Map<string, number | undefined> {
+  const times = new Map<string, number | undefined>();
+  for (const fileName of fileNames) times.set(fileName, sys.getMTime(fileName));
+  return times;
+}
+
+/**
+ * The content mappers of the builds of one `tsc -b -w`: the host that runs them, which lives as long as the
+ * watch, and each project's mappers from one rebuild to the next. tsgo keeps the task of a project whose
+ * config did not change, and with it the project's mappers; here every rebuild reads the configs again, and a
+ * project keeps its mappers while the files its config is read from are unchanged.
+ */
+export class BuildContentMappers {
+  private readonly kept = new Map<string, KeptContentMappers>();
+
+  constructor(readonly host: ContentMapperProcessHost | undefined) {}
+
+  /**
+   * Gives `task`, whose config was just read, the mappers its project had in the last rebuild, if any. They
+   * are closed if a file the config is read from changed since, as tsgo closes those of a task whose config
+   * changed, and refreshed if a file they asked to have watched did.
+   */
+  adopt(sys: System, path: string, task: BuildTask): void {
+    const kept = this.kept.get(path);
+    const resolved = task.resolved;
+    if (resolved !== undefined) {
+      const configFiles = [task.config];
+      const configFile = resolved.configFile;
+      if (configFile !== undefined) for (const extended of configFile.extendedSourceFiles) configFiles.push(extended);
+      for (const manifest of contentMapperManifests(resolved)) configFiles.push(manifest);
+      task.configFileTimes = timeStampsOf(sys, configFiles);
+    }
+    if (kept === undefined) return;
+    this.kept.delete(path);
+    // A config that changed as its time stamp was taken is told from what the mappers are told of it.
+    if (
+      resolved === undefined ||
+      anyFileChanged(sys, kept.configFiles) ||
+      !sameContentMapperProject(resolved, kept.config)
+    ) {
+      kept.project.close();
+      return;
+    }
+    // A project finds the mapper of a file by the mappers it was created with.
+    resolved.contentMappers = kept.config.contentMappers;
+    task.contentMapperProject = kept.project;
+    task.contentMapperProjectKnown = true;
+    task.contentMapperProjectError = anyFileChanged(sys, kept.watchedFiles) ? kept.project.refresh() : kept.error;
+  }
+
+  /** Closes the mappers of the projects of the last rebuild that this one has no task for. */
+  closeRest(): void {
+    for (const kept of this.kept.values()) kept.project.close();
+    this.kept.clear();
+  }
+
+  /**
+   * Keeps the mappers of `task` for the next rebuild, with the time stamps of `watchedFiles`, which they
+   * asked to have watched.
+   */
+  keep(sys: System, path: string, task: BuildTask, watchedFiles: readonly string[]): void {
+    const resolved = task.resolved;
+    const project = task.contentMapperProject;
+    const configFiles = task.configFileTimes;
+    if (resolved === undefined || project === undefined || configFiles === undefined) return;
+    this.kept.set(
+      path,
+      new KeptContentMappers(
+        resolved,
+        project,
+        task.contentMapperProjectError,
+        configFiles,
+        timeStampsOf(sys, watchedFiles),
+      ),
+    );
+  }
+}
+
+/** The `package.json` of each content mapper of `config`, whose manifest the config is read with. */
+function contentMapperManifests(config: ParsedCommandLine): string[] {
+  const manifests: string[] = [];
+  for (const mapper of config.contentMappers)
+    if (mapper.packageDirectory !== '' && mapper.contributionId === '')
+      manifests.push(combinePaths(mapper.packageDirectory, 'package.json'));
+  return manifests;
+}
+
+/**
+ * Whether the content mappers of two readings of a project's config are told the same of the project when
+ * it opens: the config file's name, mappers that are configured the same, in the same order, and the same
+ * compiler options. A watch that read a config again for the files it includes keeps the mappers of the
+ * earlier reading then.
+ */
+export function sameContentMapperProject(a: ParsedCommandLine, b: ParsedCommandLine): boolean {
+  if (a.configName !== b.configName || a.contentMappers.length !== b.contentMappers.length) return false;
+  for (let i = 0; i < a.contentMappers.length; i++)
+    if (!a.contentMappers[i]!.equals(b.contentMappers[i]!)) return false;
+  return marshalCompilerOptions(a.options) === marshalCompilerOptions(b.options);
+}
+
+/**
+ * Whether `inputPath`, a path of a file in build info, is that of a supplemental virtual file of one of the
+ * root files `roots`, which a content mapper produced with it: the root's path, a number and an extension a
+ * virtual file may have (`app.vue.0.ts`). Such a file is on no disk.
+ */
+export function isContentMapperSupplementalBuildInfoPath(inputPath: string, roots: readonly string[]): boolean {
+  for (const root of roots) {
+    if (!inputPath.startsWith(root + '.')) continue;
+    const suffix = inputPath.slice(root.length + 1);
+    const dot = suffix.indexOf('.');
+    if (dot < 0 || dot === suffix.length - 1) continue;
+    if (isDecimalInteger(suffix.slice(0, dot)) && isSupportedVirtualExtension(suffix.slice(dot))) return true;
+  }
+  return false;
+}
+
+/** Whether `text` is an integer as Go's `strconv.Atoi` reads one: digits after an optional sign. */
+function isDecimalInteger(text: string): boolean {
+  const start = text.startsWith('+') || text.startsWith('-') ? 1 : 0;
+  if (start === text.length) return false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text.charCodeAt(i);
+    if (ch < 48 || ch > 57) return false;
+  }
+  return true;
 }
 
 /** The build info of a task, read once. */
@@ -239,8 +415,9 @@ class BuildCompilerHost extends CompilerHost {
     private readonly sys: System,
     fs: CachedFileSystem,
     private readonly locale: Locale,
+    contentMapperProject: ContentMapperProject | undefined,
   ) {
-    super(fs, sys.currentDirectory, sys.defaultLibraryPath);
+    super(fs, sys.currentDirectory, sys.defaultLibraryPath, contentMapperProject);
   }
 
   /**
@@ -350,7 +527,9 @@ export function getOutputFileNames(config: ParsedCommandLine): string[] {
       const dtsFileName = getOutputDeclarationFileName(fileName, options, config);
       if (dtsFileName !== '') {
         result.push(dtsFileName);
-        if (getAreDeclarationMapsEnabled(options)) result.push(dtsFileName + '.map');
+        // The declaration map of a file a content mapper transforms is no output of the project.
+        if (config.getContentMapperForFileName(fileName) === undefined && getAreDeclarationMapsEnabled(options))
+          result.push(dtsFileName + '.map');
       }
     }
   }
@@ -447,10 +626,14 @@ export class Orchestrator {
   /** Under `--watch`, the error count is reported by the watcher instead of the summary. */
   watching = false;
   errorCount = 0;
+  /** The host that runs the content mappers of the build's projects; `undefined` without `--runExternalCode`. */
+  private contentMapperHost: ContentMapperProcessHost | undefined = undefined;
 
+  /** `contentMappers`: under `--watch`, the content mappers of the watch's builds, which outlive this one. */
   constructor(
     readonly sys: System,
     readonly command: ParsedBuildCommandLine,
+    private readonly contentMappers: BuildContentMappers | undefined = undefined,
   ) {
     const options = command.compilerOptions;
     this.locale = outputLocale(options);
@@ -525,6 +708,7 @@ export class Orchestrator {
       const configStart = performance.now();
       task.resolved = this.parseConfig(config);
       task.configTime = performance.now() - configStart;
+      this.contentMappers?.adopt(this.sys, path, task);
       const resolved = task.resolved;
       if (resolved !== undefined) this.createBuildTasks(resolved.resolvedProjectReferencePaths());
     }
@@ -581,6 +765,46 @@ export class Orchestrator {
     const completed = new Set<string>();
     const analyzing = new Set<string>();
     for (const project of projects) this.setupBuildTask(project, false, completed, analyzing, []);
+    this.contentMappers?.closeRest();
+  }
+
+  /**
+   * The content mappers of `task`'s project as the build's host runs them, created when a task first needs
+   * them, as tsgo's getContentMapperProject does; `undefined` without `--runExternalCode` and for a project
+   * without content mappers. `task.contentMapperProjectError` says why they cannot be used.
+   */
+  private contentMapperProjectOf(task: BuildTask): ContentMapperProject | undefined {
+    if (task.contentMapperProjectKnown) return task.contentMapperProject;
+    task.contentMapperProjectKnown = true;
+    const host = this.contentMapperHost;
+    const resolved = task.resolved;
+    if (host === undefined || resolved === undefined || resolved.contentMappers.length === 0) return undefined;
+    task.contentMapperProject = host.project(
+      new ContentMapperProjectSpec(resolved.configName, resolved.contentMappers, resolved.options),
+    );
+    return task.contentMapperProject;
+  }
+
+  /**
+   * For `tsc -b -w`, once the build is done: keeps each project's content mappers for the next rebuild, and
+   * returns the files a change of which the watch rebuilds for, as tsgo's build watches them: the
+   * `package.json` of each mapper and the files the mappers asked to have watched.
+   */
+  keepContentMappers(): string[] {
+    const files: string[] = [];
+    for (const [path, task] of this.tasks) {
+      const resolved = task.resolved;
+      if (resolved === undefined) continue;
+      for (const manifest of contentMapperManifests(resolved)) files.push(manifest);
+      const project = task.contentMapperProject;
+      if (project === undefined) continue;
+      const answer = project.watchedFiles();
+      const watchedFiles = Array.isArray(answer) ? answer : [];
+      if (!Array.isArray(answer)) task.contentMapperProjectError = answer;
+      for (const fileName of watchedFiles) files.push(fileName);
+      this.contentMappers?.keep(this.sys, path, task, watchedFiles);
+    }
+    return files;
   }
 
   /** Builds or cleans every project; returns the exit status. */
@@ -601,6 +825,9 @@ export class Orchestrator {
 
   /** Builds the projects from `this.order`; returns whether a project's check went to threads. */
   private run(done: (status: ExitStatus) => void, threads: boolean): boolean {
+    const contentMappers = this.contentMappers;
+    this.contentMapperHost =
+      contentMappers !== undefined ? contentMappers.host : newContentMapperHost(this.sys, this.command.compilerOptions);
     this.generateGraph();
     const command = this.command;
     if (command.buildOptions.clean !== true && this.verbose) {
@@ -655,6 +882,8 @@ export class Orchestrator {
 
   /** Reports the summary of the build; returns its exit status. */
   private finish(state: BuildState): ExitStatus {
+    // The build is done: its content mappers stop, unless a watch keeps them for its next rebuild.
+    if (this.contentMappers === undefined) this.contentMapperHost?.close();
     const errors = state.errors;
     this.errorCount = errors.length;
     if (!this.watching) this.errorSummary.report(errors);
@@ -711,6 +940,14 @@ export class Orchestrator {
     const times = new CompileTimes();
     times.configTime = task.configTime;
     const readStart = performance.now();
+    const contentMapperProject = this.contentMapperProjectOf(task);
+    const failure = task.contentMapperProjectError;
+    if (failure !== undefined) {
+      this.reportDiagnostic(task, contentMapperProjectDiagnostic(failure));
+      task.status = new UpToDateStatus(Status.BuildErrors);
+      task.exitStatus = ExitStatus.DiagnosticsPresent_OutputsSkipped;
+      return false;
+    }
     const oldSnapshot = this.force
       ? undefined
       : readBuildInfoProgram(
@@ -718,6 +955,7 @@ export class Orchestrator {
           new TaskBuildInfoReader(this, task),
           sys.defaultLibraryPath,
           sys.currentDirectory,
+          contentMapperProject,
         );
     times.buildInfoReadTime = performance.now() - readStart;
     // Checker threads check every file without old build info, and the files a change affects with it
@@ -728,7 +966,16 @@ export class Orchestrator {
     // A program checked by threads is shared with them and can't change after; the project's config
     // here, whose output paths are computed later, gets a copy of its own.
     const config = mayUseThreads ? copyCommandLine(resolved) : resolved;
-    const host = new BuildCompilerHost(sys, this.fs, this.locale);
+    const host = new BuildCompilerHost(sys, this.fs, this.locale, contentMapperProject);
+    // Once the program is loaded: the identities of its mappers for the build info it writes (a program that
+    // only lists its files writes none), and the host lets go of the mappers, which the task keeps.
+    const loaded = (): void => {
+      task.contentMapperIdentities =
+        config.options.listFilesOnly === true || config.buildInfoFileName() === ''
+          ? undefined
+          : contentMapperIdentities(contentMapperProject);
+      host.contentMapperProject = undefined;
+    };
     const configOptions = config.options;
     const checkers = threads ? checkerThreads(configOptions.checkers, configOptions.singleThreaded) : 1;
     // The projects of a build that builds several at once run beside each other, and each one's timings
@@ -785,12 +1032,15 @@ export class Orchestrator {
           loader.takesPreparedResolutions = false;
           program = new Program(config, host, loader);
         }
+        loaded();
         reportPreparedFiles(program.getSourceFiles().map((f) => f.fileName));
         if (!this.checkAndEmit(task, program, parseStart, times, oldSnapshot, mayUseThreads, then)) then();
       });
       return true;
     }
-    return this.checkAndEmit(task, new Program(config, host), parseStart, times, oldSnapshot, mayUseThreads, then);
+    const program = new Program(config, host);
+    loaded();
+    return this.checkAndEmit(task, program, parseStart, times, oldSnapshot, mayUseThreads, then);
   }
 
   /**
@@ -966,6 +1216,8 @@ export class Orchestrator {
   ): IncrementalProgram {
     const changesStart = performance.now();
     const incrementalProgram = new IncrementalProgram(checked, times, oldSnapshot, new SystemTimeStamps(this.sys));
+    const identities = task.contentMapperIdentities;
+    if (identities !== undefined) incrementalProgram.contentMapperIdentities = identities;
     times.changesComputeTime = performance.now() - changesStart;
     task.program = incrementalProgram;
     return incrementalProgram;
@@ -1116,6 +1368,12 @@ export class Orchestrator {
     const buildInfo = entry.buildInfo;
     if (buildInfo === undefined) return new UpToDateStatus(Status.OutputMissing, buildInfoPath);
     if (!buildInfo.isValidVersion()) return new UpToDateStatus(Status.TsVersionOutputOfDate, buildInfo.version);
+    // The files of a content mapper whose identity changed since the build info was written may be out of date.
+    const mappers = contentMapperIdentities(this.contentMapperProjectOf(task));
+    if (mappers.failure !== undefined) task.contentMapperProjectError = mappers.failure;
+    if (task.contentMapperProjectError !== undefined || !buildInfo.contentMapperIdentitiesMatch(mappers.identities)) {
+      return new UpToDateStatus(Status.OutOfDateOptions, buildInfoPath);
+    }
     if (buildInfo.errors || (options.noCheck !== true && (buildInfo.semanticErrors || buildInfo.checkPending))) {
       return new UpToDateStatus(Status.OutOfDateBuildInfoWithErrors, buildInfoPath);
     }
@@ -1177,7 +1435,8 @@ export class Orchestrator {
 
     if (buildInfo.isIncremental()) {
       const resolvedRoots = new Set<string>();
-      for (const root of rootReader.roots()) {
+      const roots = rootReader.roots();
+      for (const root of roots) {
         const found = rootReader.getFileInfo(root);
         if (found.resolved !== '') resolvedRoots.add(found.resolved);
       }
@@ -1188,6 +1447,8 @@ export class Orchestrator {
         const inputFile = getNormalizedAbsolutePath(buildInfoFileName, buildInfoDirectory);
         const inputPath = this.toPath(inputFile);
         if (seenRoots.has(inputPath) || resolvedRoots.has(inputPath)) continue;
+        // A supplemental virtual file of a root file a content mapper produced is not on disk.
+        if (isContentMapperSupplementalBuildInfoPath(inputPath, roots) && !this.sys.fileExists(inputFile)) continue;
         const inputTime = this.getMTime(inputFile);
         if (inputTime === undefined) return new UpToDateStatus(Status.InputFileMissing, inputFile);
         if (after(inputTime, oldestOutput.time)) {

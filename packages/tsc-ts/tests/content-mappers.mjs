@@ -1,10 +1,13 @@
 // The content mappers of tsgo's compiler tests (its testutil/contentmappertest package), which the upstream
-// cases named contentMapper*.ts select by the `exec` of their mapper's package.json. Each answers the
-// requests of the protocol with what tsgo's mapper answers, as plain JSON values. They count positions in
-// UTF-8 bytes, as tsgo's do, so they work on the bytes of a file.
+// cases named contentMapper*.ts select by the `exec` of their mapper's package.json, and the two verbatim
+// mappers of its build and watch tests. Each answers the requests of the protocol with what tsgo's mapper
+// answers, as plain JSON values. They count positions in UTF-8 bytes, as tsgo's do, so they work on the bytes
+// of a file.
 
 /** The names of the mappers, which are the commands their manifests declare. */
 export const transformingMapper = 'compiler-test-mapper';
+export const verbatimMapper = 'verbatim-mapper';
+export const dynamicVerbatimMapper = 'dynamic-verbatim-mapper';
 export const failingMapper = 'failing-mapper';
 export const lispMapper = 'lisp-mapper';
 export const supplementalMapper = 'supplemental-mapper';
@@ -198,6 +201,40 @@ function transformingHandler({ SpanMap, SpanMapSegment }) {
 
 // ---- The other mappers
 
+/** A mapper whose output is the content itself. */
+const verbatimHandler = () => mapper('mapper', ({ content }) => identityMappedOutput(content));
+
+/**
+ * The verbatim mapper with configuration of its own, as a mapper whose manifest has `dynamicConfig` reports
+ * it: a project's configuration identity is its config file's name and its mapper options, and it asks for
+ * `mapper.config.json` beside the config file to be watched. A transform needs the handle of its project.
+ */
+const dynamicVerbatimHandler = () => {
+  const verbatim = verbatimHandler();
+  return {
+    handleRequest(method, params) {
+      if (method === 'openProject') {
+        const options = params.options === undefined ? '' : JSON.stringify(params.options);
+        const configFileName = params.configFileName ?? '';
+        const directory = configFileName.slice(0, Math.max(configFileName.lastIndexOf('/'), 0));
+        const result = {
+          configIdentity: `${configFileName}:${options}`,
+          watchedFiles: [`${directory}/mapper.config.json`],
+        };
+        if (options === '{"plugins":[{"name":1}]}')
+          result.optionDiagnostics = [
+            { path: ['plugins', 0, 'name'], messageText: "Option 'name' requires a string.", code: 123 },
+          ];
+        return result;
+      }
+      if (method === 'closeProject') return null;
+      if (method === 'transform' && (params.projectHandle ?? '') === '')
+        throw new Error('content mapper transform requires a project handle');
+      return verbatim.handleRequest(method, params);
+    },
+  };
+};
+
 /** A mapper that fails every transform. */
 const failingHandler = () =>
   mapper('mapper', () => {
@@ -269,6 +306,8 @@ const supplementalModuleHandler = () =>
 
 const handlers = new Map([
   [transformingMapper, transformingHandler],
+  [verbatimMapper, verbatimHandler],
+  [dynamicVerbatimMapper, dynamicVerbatimHandler],
   [failingMapper, failingHandler],
   [lispMapper, lispHandler],
   [supplementalMapper, supplementalHandler],
@@ -311,6 +350,7 @@ export function createTestMapperSpawner(spanMap) {
   return (command) => {
     const create = handlers.get(command[0]);
     if (create === undefined) throw new Error(`contentmappertest: unknown mapper command [${command.join(' ')}]`);
-    return staticProjectHandler(create(spanMap));
+    // The mapper with configuration of its own answers the project requests itself.
+    return command[0] === dynamicVerbatimMapper ? create(spanMap) : staticProjectHandler(create(spanMap));
   };
 }

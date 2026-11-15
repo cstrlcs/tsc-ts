@@ -1,6 +1,8 @@
 // Runs `tsc --build`, `--incremental` and related scenarios through tsgo (packages/tsgo/dist/tsgo) and tsc-ts
 // (the Node build, or TSC_TS_BIN), step by step in two copies of a project, and compares output, exit status and
 // every file afterwards, .tsbuildinfo included. Times in status lines are masked, as are statistics values.
+// Projects with content mappers run them as processes (content-mapper-server.mjs) that both compilers find on
+// PATH, and what each compiler asked of the mappers is compared too.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
@@ -16,9 +18,17 @@ import {
   utimesSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, join, relative, resolve } from 'node:path';
+import { delimiter, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { tempDir } from './temp.mjs';
+import { writeMapperLaunchers } from './content-mapper-server.mjs';
+import {
+  dynamicVerbatimMapper,
+  supplementalDiagnosticsMapper,
+  supplementalMapper,
+  transformingMapper,
+  verbatimMapper,
+} from './content-mappers.mjs';
+import { compileSources, tempDir } from './temp.mjs';
 import { tscTs, tscTsMissing } from './toolchain.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -26,11 +36,33 @@ const root = resolve(here, '../../..');
 const tsgo = join(root, 'packages/tsgo/dist/tsgo');
 const bundledLibs = join(root, 'upstream/TypeScript/tsc/internal/bundled/libs');
 const skip = (!existsSync(tsgo) && 'needs packages/tsgo/dist/tsgo') || tscTsMissing;
+// A launcher for each test content mapper, which a mapper's package.json names by its `exec`.
+const launchers = writeMapperLaunchers(
+  tempDir('tsc-ts-build-mappers-'),
+  join(compileSources('tsc-ts-build-', ['compiler/span-map.ts']), 'compiler/span-map.js'),
+);
+// The system starts processes on Linux and macOS.
+const skipMappers = skip || (process.platform === 'win32' && 'the system starts no processes on Windows');
 
 /**
  * @typedef {{ args: string[], edit?: Record<string, string | null>, touch?: string[], cwd?: string }} Step
- * @typedef {{ files: Record<string, string>, links?: Record<string, string>, steps: Step[] }} Scenario
+ * @typedef {{ files: Record<string, string>, links?: Record<string, string>, steps: Step[], mappers?: boolean }} Scenario
  */
+
+/** The package.json of a content mapper package whose command is the test mapper `exec`. */
+function mapperPackage(exec, contentMapper = {}, version = '1.0.0') {
+  return JSON.stringify({ name: 'mapper', version, typescript: { contentMapper: { exec: [exec], ...contentMapper } } });
+}
+
+/** A config file with `compilerOptions`, the content mapper package `mapper` for `extension`, and `rest`. */
+function mappedConfig(compilerOptions, extension, rest = {}) {
+  return JSON.stringify({ compilerOptions, contentMappers: [{ package: 'mapper', extensions: [extension] }], ...rest });
+}
+
+// What the projects with mapped files are built with: no output but build info, and declarations, with which a
+// mapped file is in the pending emit as any other file.
+const mappedOptions = { incremental: true, noEmit: true, declaration: true, strict: true, types: [] };
+const external = '--runExternalCode';
 
 /**
  * `count` modules, each importing the next, an ambient module, a pattern ambient module and a type of a module
@@ -859,7 +891,242 @@ const scenarios = {
       { args: ['--checkers', '4'] },
     ],
   },
+  // A mapped file's version is that of its original text and of the mapper's transform, and the build info lists
+  // the identity of each mapper. The mapper's own diagnostic (an expectation that nothing met) and the compiler's,
+  // after a line with characters of several bytes, are stored with it and reported from it by steps 2 and 3. A
+  // compiler option the mapper declares (step 4), the mapped file (step 5) and the mapper's version (step 6) each
+  // check the mapped file again.
+  'mapped files and the diagnostics of a content mapper in build info': {
+    mappers: true,
+    files: {
+      'tsconfig.json': mappedConfig({ ...mappedOptions, target: 'es2022' }, '.box', {
+        files: ['widget.box', 'main.ts'],
+      }),
+      'widget.box':
+        '// @box-expect-error: nothing to expect\nexport const a = 1;\nconst é = "😀"; export const b: number = é;\n' +
+        '// @box-ignore\nexport const c: number = "x";\nexport const t: string = #{target};\n',
+      'main.ts': 'import { a } from "./widget.box";\nexport const x: string = a;\n',
+      'node_modules/mapper/package.json': mapperPackage(transformingMapper, { compilerOptions: ['target', 'jsx'] }),
+    },
+    steps: [
+      { args: [external] },
+      { args: [external] },
+      { args: [external], edit: { 'main.ts': 'import { a } from "./widget.box";\nexport const x: number = a;\n' } },
+      { args: [external, '--target', 'es2023'] },
+      {
+        args: [external, '--target', 'es2023'],
+        edit: { 'widget.box': 'export const a = 1;\nexport const t = #{target};\n' },
+      },
+      {
+        args: [external, '--target', 'es2023'],
+        edit: {
+          'node_modules/mapper/package.json': mapperPackage(
+            transformingMapper,
+            { compilerOptions: ['target', 'jsx'] },
+            '1.1.0',
+          ),
+        },
+      },
+      { args: [external, '--target', 'es2023'] },
+      // Without the flag the mappers are not read, and the build info is written without them.
+      { args: ['--target', 'es2023'] },
+    ],
+  },
+  // The identity of a mapper with configuration of its own takes what the mapper says of the project when it
+  // opens. Step 4 touches the mapped file, whose version is not the hash of its text; step 5 changes the mapper's
+  // version; step 6 prints what the mapper did, for a compile without build info, whose statistics have the same
+  // rows whatever the times; from step 7 the mapper cannot start, so its identity cannot be had:
+  // the project is not built (step 7), or built without build info (steps 8 and 9), and a dry build asks no
+  // mapper (step 10).
+  'a content mapper with configuration of its own in builds': {
+    mappers: true,
+    files: {
+      'tsconfig.json': mappedConfig(mappedOptions, '.vue'),
+      'app.vue': 'export const app: number = 1;\n',
+      'main.ts': 'import { app } from "./app.vue";\nexport const x: string = app;\n',
+      'mapper.config.json': '{ "version": 1 }',
+      'node_modules/mapper/package.json': mapperPackage(dynamicVerbatimMapper, { dynamicConfig: true }),
+    },
+    steps: [
+      { args: ['-b', external, '--verbose'] },
+      {
+        args: ['-b', external, '--verbose'],
+        edit: { 'main.ts': 'import { app } from "./app.vue";\nexport const x = app;\n' },
+      },
+      { args: ['-b', external, '--verbose'] },
+      { args: ['-b', external, '--verbose'], touch: ['app.vue'] },
+      {
+        args: ['-b', external, '--verbose'],
+        edit: {
+          'node_modules/mapper/package.json': mapperPackage(dynamicVerbatimMapper, { dynamicConfig: true }, '2.0.0'),
+        },
+      },
+      {
+        args: [external, '--diagnostics', '--incremental', 'false'],
+        edit: { 'app.vue': 'export const app: string = 1;\n' },
+      },
+      {
+        args: ['-b', external, '--verbose'],
+        edit: { 'node_modules/mapper/package.json': mapperPackage('missing-mapper', { dynamicConfig: true }, '2.0.0') },
+      },
+      { args: ['-b', external, '--verbose', '--force'] },
+      { args: [external] },
+      { args: ['-b', external, '--dry'] },
+    ],
+  },
+  // The supplemental virtual file of a root file is in the build info and on no disk: the project is up to date
+  // without it (step 2), and out of date once a file has its name (step 3), which the mapper's file then cannot take.
+  'supplemental virtual files in build info': {
+    mappers: true,
+    files: {
+      'tsconfig.json': mappedConfig(mappedOptions, '.vue', { files: ['app.vue'] }),
+      'app.vue': 'declare const value: number;\n',
+      'node_modules/mapper/package.json': mapperPackage(supplementalMapper),
+    },
+    steps: [
+      { args: ['-b', external, '--verbose'] },
+      { args: ['-b', external, '--verbose'] },
+      { args: ['-b', external, '--verbose'], edit: { 'app.vue.0.ts': 'export {};\n' } },
+    ],
+  },
+  // The diagnostics of a supplemental virtual file are stored for it, and reported from the build info (steps 2 and
+  // 3) under the name of the file the mapper produced it for: where they map to in its text, after a line with
+  // characters of several bytes, or as code the mapper made up.
+  'the diagnostics of a supplemental virtual file in build info': {
+    mappers: true,
+    files: {
+      'tsconfig.json': mappedConfig(mappedOptions, '.astro'),
+      'app.astro': 'const é = "😀"; const value: string = 1;\n',
+      'main.ts': 'export const m = 1;\n',
+      'node_modules/mapper/package.json': mapperPackage(supplementalDiagnosticsMapper),
+    },
+    steps: [
+      { args: [external] },
+      { args: [external] },
+      { args: [external], edit: { 'main.ts': 'export const m = 2;\n' } },
+    ],
+  },
+  // What a mapper says about its options is an error of the program, which the build info only flags: the
+  // project is built again to report it.
+  'the option diagnostics of a content mapper are reported again': {
+    mappers: true,
+    files: {
+      'tsconfig.json': JSON.stringify({
+        compilerOptions: { ...mappedOptions, noCheck: true },
+        contentMappers: [{ package: 'mapper', extensions: ['.vue'], options: { plugins: [{ name: 1 }] } }],
+      }),
+      'app.vue': 'export const value = 1;\n',
+      'node_modules/mapper/package.json': mapperPackage(verbatimMapper),
+    },
+    steps: [
+      { args: ['-b', external, '--verbose', '--pretty', 'false'] },
+      { args: ['-b', external, '--verbose', '--pretty', 'false'] },
+      { args: [external] },
+    ],
+  },
+  // A mapper with configuration of its own says what it makes of its options when its project opens. With no
+  // file to transform, tsgo opens it before it loads the program only to compare its identity with build info:
+  // the first build, without build info, reports nothing, and the next ones the mapper's diagnostic.
+  'the option diagnostics of a content mapper that transforms no file': {
+    mappers: true,
+    files: {
+      'tsconfig.json': JSON.stringify({
+        compilerOptions: mappedOptions,
+        files: ['main.ts'],
+        contentMappers: [{ package: 'mapper', extensions: ['.vue'], options: { plugins: [{ name: 1 }] } }],
+      }),
+      'main.ts': 'export const m = 1;\n',
+      'node_modules/mapper/package.json': mapperPackage(dynamicVerbatimMapper, { dynamicConfig: true }),
+    },
+    steps: [
+      { args: [external] },
+      { args: [external] },
+      { args: [external, '--listFilesOnly'] },
+      { args: ['-b', external, '--verbose'] },
+    ],
+  },
+  // The declaration map of a mapped file is no output of its project, which cleaning leaves: here files with the
+  // name tsgo gives such a map, and with those of a map beside the mapped file's name or a TypeScript file's.
+  'cleaning a project with a mapped file': {
+    mappers: true,
+    files: {
+      'tsconfig.json': mappedConfig({ outDir: 'out', declaration: true, declarationMap: true, types: [] }, '.vue', {
+        files: ['a.ts', 'app.vue'],
+      }),
+      'a.ts': 'export const a = 1;\n',
+      'app.vue': 'export const app = 1;\n',
+      'node_modules/mapper/package.json': mapperPackage(verbatimMapper),
+      'out/a.js': '',
+      'out/a.d.ts': '',
+      'out/a.d.ts.map': '',
+      'out/app.d.vue.ts.map': '',
+      'out/app.vue.map': '',
+      'out/app.d.ts.map': '',
+    },
+    steps: [{ args: ['-b', external, '--clean', '--dry'] }, { args: ['-b', external, '--clean'] }],
+  },
+  // Two projects with the same mapper are built by one mapper process, and a project without mappers records none.
+  // One project at a time, so that tsgo asks the mapper in one order.
+  'projects of a build that share a content mapper': {
+    mappers: true,
+    files: {
+      'tsconfig.json': '{"files":[],"references":[{"path":"a"},{"path":"b"},{"path":"c"}]}',
+      'a/tsconfig.json': mappedConfig(mappedOptions, '.vue'),
+      'a/app.vue': 'export const a: string = 1;\n',
+      'b/tsconfig.json': mappedConfig(mappedOptions, '.vue'),
+      'b/app.vue': 'export const b = 1;\n',
+      'c/tsconfig.json': JSON.stringify({ compilerOptions: mappedOptions }),
+      'c/index.ts': 'export const c = 1;\n',
+      'node_modules/mapper/package.json': mapperPackage(verbatimMapper),
+    },
+    steps: [
+      { args: ['-b', external, '--verbose', '--builders', '1'] },
+      { args: ['-b', external, '--verbose', '--builders', '1'], edit: { 'a/app.vue': 'export const a = 1;\n' } },
+      { args: ['-b', external, '--verbose', '--builders', '1'] },
+    ],
+  },
 };
+
+// The extension of a mapped file's output is the one its mapper's manifest gives, or the config entry's in its
+// place. When it changes, a compile and a build emit the file that imports the mapped file again, with the import
+// rewritten to the new extension (tsgo's TestContentMapperOutputExtensionsIncrementalEmit).
+for (const args of [[external], ['-b', external]]) {
+  for (const override of [false, true]) {
+    const config = (output) =>
+      JSON.stringify({
+        compilerOptions: {
+          composite: true,
+          module: 'preserve',
+          rewriteRelativeImportExtensions: true,
+          outDir: 'dist',
+          types: [],
+        },
+        contentMappers: [
+          { package: 'mapper', extensions: ['.vue'], ...(override && { outputExtensions: { '.vue': output } }) },
+        ],
+      });
+    const manifest = (output) => mapperPackage(verbatimMapper, { outputExtensions: { '.vue': output } });
+    const changed = override ? 'a config entry' : 'a manifest';
+    scenarios[`tsc ${args.join(' ')} after the output extension of ${changed} changed`] = {
+      mappers: true,
+      files: {
+        'tsconfig.json': config('.js'),
+        'app.vue': 'export const app = 1;\n',
+        'main.ts': 'export { app } from "./app.vue";\n',
+        'node_modules/mapper/package.json': manifest('.js'),
+      },
+      steps: [
+        { args },
+        {
+          args,
+          edit: override
+            ? { 'tsconfig.json': config('.jsx') }
+            : { 'node_modules/mapper/package.json': manifest('.jsx') },
+        },
+      ],
+    };
+  }
+}
 
 /** Creates the symbolic links `links`, from paths in `dir` to their targets. */
 function writeLinks(dir, links) {
@@ -956,7 +1223,8 @@ function normalize(text, dir) {
     text
       .replaceAll(dir, '<dir>')
       .replace(/\d\d:\d\d:\d\d [AP]M/g, '<time>')
-      .replace(/^((?:Aggregate )?[A-Za-z][A-Za-z ]+:) +\S+$/gm, '$1 <value>')
+      // A statistic's name is words, or the identity of a content mapper (`mapper@1.0.0`) and what it did.
+      .replace(/^((?:Aggregate )?[A-Za-z][A-Za-z ]+:|[\w@.-]+ [A-Za-z]+ time:) +\S+$/gm, '$1 <value>')
       // The run configuration the compiler chose, which tsc-ts prints and tsgo does not.
       .replace(/\nSuggestions:\n(?: {2}.*\n)+/g, '')
       // Outputs written in the same clock tick have the same time, so which one is oldest varies.
@@ -964,29 +1232,63 @@ function normalize(text, dir) {
   );
 }
 
-function run(command, args, cwd) {
-  const env = { PATH: process.env.PATH ?? '', TSC_TS_BUNDLED_LIBS: bundledLibs, NO_COLOR: '1' };
+/** The environment of a compiler, which finds the test content mappers on PATH. */
+function environment(extraEnv = {}) {
+  return {
+    PATH: `${launchers}${delimiter}${process.env.PATH ?? ''}`,
+    TSC_TS_BUNDLED_LIBS: bundledLibs,
+    NO_COLOR: '1',
+    ...extraEnv,
+  };
+}
+
+function run(command, args, cwd, extraEnv = {}) {
+  const env = environment(extraEnv);
   const result = spawnSync(command[0], [...command.slice(1), ...args], { cwd, env, encoding: 'utf8' });
   return { output: result.stdout + result.stderr, status: result.status };
 }
 
+/**
+ * The requests the test content mappers logged in the file `log` (CONTENT_MAPPER_LOG), as the methods each mapper
+ * was asked, in order; the file is removed. Mappers are separate processes, so the order between them is not kept.
+ */
+function mapperRequests(log) {
+  const requests = {};
+  if (!existsSync(log)) return requests;
+  for (const line of readFileSync(log, 'utf8').split('\n')) {
+    if (line === '') continue;
+    const [mapper, method] = line.split(' ');
+    (requests[mapper] ??= []).push(method);
+  }
+  rmSync(log);
+  return requests;
+}
+
 for (const [name, scenario] of Object.entries(scenarios)) {
-  test(name, { skip }, () => {
+  test(name, { skip: scenario.mappers ? skipMappers : skip }, () => {
     const dirs = { tsgo: tempDir('tsc-ts-build-tsgo-'), ours: tempDir('tsc-ts-build-ours-') };
     for (const dir of Object.values(dirs)) {
       writeFiles(dir, scenario.files);
       if (scenario.links) writeLinks(dir, scenario.links);
     }
+    // A project with content mappers is built at one path by both compilers, each on its own copy moved there:
+    // what a mapper says of a project may hold the project's path, and the build info then a digest of it.
+    const work = scenario.mappers ? join(tempDir('tsc-ts-build-mapped-'), 'project') : undefined;
+    const log = join(tempDir('tsc-ts-build-requests-'), 'requests');
     const failures = [];
     for (const [index, step] of scenario.steps.entries()) {
       const results = {};
-      for (const [which, dir] of Object.entries(dirs)) {
+      for (const [which, home] of Object.entries(dirs)) {
+        const dir = work ?? home;
+        if (work !== undefined) renameSync(home, work);
         if (step.edit) writeFiles(dir, step.edit);
         if (step.touch) touch(dir, step.touch);
-        const { output, status } = run(which === 'tsgo' ? [tsgo] : tscTs, step.args, join(dir, step.cwd ?? '.'));
+        const command = which === 'tsgo' ? [tsgo] : tscTs;
+        const { output, status } = run(command, step.args, join(dir, step.cwd ?? '.'), { CONTENT_MAPPER_LOG: log });
         const files = readFiles(dir);
         for (const [file, text] of Object.entries(files)) files[file] = normalize(text, dir);
-        results[which] = { output: normalize(output, dir), status, files };
+        results[which] = { output: normalize(output, dir), status, files, requests: mapperRequests(log) };
+        if (work !== undefined) renameSync(work, home);
       }
       const label = `step ${index + 1} (tsc ${step.args.join(' ')})`;
       const { tsgo: expected, ours: actual } = results;
@@ -995,6 +1297,10 @@ for (const [name, scenario] of Object.entries(scenarios)) {
       }
       if (expected.status !== actual.status)
         failures.push(`${label}: status tsgo ${expected.status}, ours ${actual.status}`);
+      if (JSON.stringify(expected.requests) !== JSON.stringify(actual.requests))
+        failures.push(
+          `${label}: requests to content mappers\n--- tsgo\n${JSON.stringify(expected.requests)}\n--- ours\n${JSON.stringify(actual.requests)}`,
+        );
       const files = new Set([...Object.keys(expected.files), ...Object.keys(actual.files)]);
       for (const file of [...files].sort()) {
         if (expected.files[file] === actual.files[file]) continue;
@@ -1067,7 +1373,7 @@ async function watchSequence(args, steps, files = watchProject, prepare = () => 
   const dir = tempDir('tsc-ts-watch-');
   writeFiles(dir, files);
   prepare(dir);
-  const env = { PATH: process.env.PATH ?? '', TSC_TS_BUNDLED_LIBS: bundledLibs, NO_COLOR: '1', ...extraEnv };
+  const env = environment(extraEnv);
   const child = spawn(command[0], [...command.slice(1), ...args, '--preserveWatchOutput'], { cwd: dir, env });
   let output = '';
   let exit;
@@ -1640,5 +1946,261 @@ test(
         '<time> - Found 1 error. Watching for file changes.\n\n',
     );
     assert.deepEqual(files, ['a.js']);
+  },
+);
+
+/**
+ * Watches a project with content mappers through tsgo and through tsc-ts, each with `args` and the edits of
+ * `steps` (`watchSequence`), and returns for each the output and the requests its mappers got (`mapperRequests`).
+ */
+async function watchWithMappers(args, steps, files, prepare = () => {}) {
+  const results = {};
+  for (const [which, command] of [
+    ['tsgo', [tsgo]],
+    ['ours', tscTs],
+  ]) {
+    const log = join(tempDir('tsc-ts-watch-requests-'), 'requests');
+    const extraEnv = { CONTENT_MAPPER_LOG: log, TSC_TS_WATCH_MEMORY: '0' };
+    const { output } = await watchSequence([...args, external], steps, files, prepare, extraEnv, command);
+    results[which] = { output, requests: mapperRequests(log) };
+  }
+  return results;
+}
+
+/** A step of `watchSequence` that writes `files` in place, as an editor saves, which changes no directory. */
+const inPlace = (files) => (dir) => {
+  for (const [path, text] of Object.entries(files)) writeFileSync(join(dir, path), text);
+};
+
+// A watch build's project emits nothing, and a watch writes no build info: tsgo's watch builds again when its own
+// build info changes.
+const watchedOptions = { noEmit: true, strict: true, types: [] };
+const mappedWatches = [
+  ['--watch', watchedOptions],
+  ['--build --watch', mappedOptions],
+];
+
+// A watch starts each mapper once and keeps it between builds. The edits: the config names another mapper, which
+// starts as the first one ends; the config has no mapper; the first mapper again; the same config written again,
+// for which the mapper's project closes and opens while the mapper runs on; a new version of the mapper, whose
+// package is linked from elsewhere, which is another mapper; the mapped file; and a file that is not mapped, for
+// which `--watch` transforms nothing.
+for (const [args, options] of mappedWatches) {
+  test(
+    `${args} starts and ends content mappers as the config changes`,
+    { skip: skipMappers, timeout: 300_000 },
+    async () => {
+      const config = (mapper) =>
+        JSON.stringify({ compilerOptions: options, contentMappers: [{ package: mapper, extensions: ['.vue'] }] });
+      const files = {
+        'tsconfig.json': config('mapper-a'),
+        'app.vue': 'export const app: number = 1;\n',
+        'main.ts': 'export const m = 1;\n',
+        'packages/mapper-a/package.json': mapperPackage(verbatimMapper),
+        'node_modules/mapper-b/package.json': mapperPackage(verbatimMapper, {}, '2.0.0'),
+      };
+      const steps = [
+        ['tsconfig.json', config('mapper-b')],
+        ['tsconfig.json', JSON.stringify({ compilerOptions: options, files: ['main.ts'] })],
+        ['tsconfig.json', config('mapper-a')],
+        ['tsconfig.json', config('mapper-a') + '\n'],
+        ['packages/mapper-a/package.json', mapperPackage(verbatimMapper, {}, '3.0.0')],
+        ['app.vue', 'export const app: string = 1;\n'],
+        inPlace({ 'main.ts': 'export const m: string = 1;\n' }),
+      ];
+      const prepare = (dir) => writeLinks(dir, { 'node_modules/mapper-a': '../packages/mapper-a' });
+      const { tsgo: expected, ours: actual } = await watchWithMappers(args.split(' '), steps, files, prepare);
+      assert.equal(actual.output, expected.output);
+      assert.deepEqual(actual.requests, expected.requests);
+      const start = ['initialize', 'openProject', 'transform'];
+      const restart = ['closeProject', ...start];
+      const reopened = ['closeProject', 'openProject', 'transform'];
+      assert.deepEqual(
+        expected.requests[verbatimMapper],
+        [
+          start,
+          // The other mapper starts; it ends with the config without mappers, and the first one starts again.
+          restart,
+          restart,
+          // The config written again: a build ends the mapper with the project's task and starts it again.
+          args === '--watch' ? reopened : restart,
+          restart,
+          // The mapped file, and for a build the file that is not mapped.
+          args === '--watch' ? ['transform'] : ['transform', 'transform'],
+        ].flat(),
+      );
+      assert.equal((expected.output.match(/error TS2322/g) ?? []).length, 3);
+    },
+  );
+}
+
+// A mapper with configuration of its own asks for a file to be watched. The edits: the mapped file; a file that is
+// not mapped; the watched file, for which the mapper's project closes and opens again while the mapper runs on;
+// and the mapped file with one that imports it, which are checked together.
+for (const [args, options] of mappedWatches) {
+  test(
+    `${args} refreshes a content mapper when a file it watches changes`,
+    { skip: skipMappers, timeout: 300_000 },
+    async () => {
+      const files = {
+        'tsconfig.json': mappedConfig(options, '.vue'),
+        'app.vue': 'export const marker = 1 as const;\n',
+        'main.ts': 'import { marker } from "./app.vue";\nexport const check: 1 = marker;\n',
+        'mapper.config.json': '{ "version": 1 }',
+        'node_modules/mapper/package.json': mapperPackage(dynamicVerbatimMapper, { dynamicConfig: true }),
+      };
+      const steps = [
+        ['app.vue', 'export const marker = 3 as const;\n'],
+        inPlace({ 'main.ts': 'import { marker } from "./app.vue";\nexport const check: 3 = marker;\n' }),
+        ['mapper.config.json', '{ "version": 2 }'],
+        inPlace({
+          'app.vue': 'export const marker = 2 as const;\n',
+          'main.ts': 'import { marker } from "./app.vue";\nexport const check: 2 = marker;\n',
+        }),
+      ];
+      const { tsgo: expected, ours: actual } = await watchWithMappers(args.split(' '), steps, files);
+      assert.equal(actual.output, expected.output);
+      assert.deepEqual(actual.requests, expected.requests);
+      // A build transforms the mapped file again for the file that is not mapped, and builds nothing for the
+      // watched file, which leaves the project up to date.
+      assert.deepEqual(
+        expected.requests[dynamicVerbatimMapper],
+        [
+          ['initialize', 'openProject', 'transform', 'transform'],
+          args === '--watch' ? [] : ['transform'],
+          ['closeProject', 'openProject', 'transform'],
+          args === '--watch' ? ['transform'] : [],
+        ].flat(),
+      );
+      // Only the first edit leaves an error, and the last one none of a file checked against the other's old text.
+      assert.equal((expected.output.match(/error TS/g) ?? []).length, 1);
+    },
+  );
+}
+
+// A file with the name of a supplemental virtual file loads the program again, where the mapper's file cannot
+// take the name; so does removing it.
+test(
+  '--watch loads the program again for the name of a supplemental virtual file',
+  { skip: skipMappers, timeout: 300_000 },
+  async () => {
+    const files = {
+      'tsconfig.json': mappedConfig(watchedOptions, '.vue'),
+      'app.vue': 'declare const value: number;\n',
+      'node_modules/mapper/package.json': mapperPackage(supplementalMapper),
+    };
+    const steps = [
+      ['app.vue.0.ts', 'export {};\n'],
+      ['app.vue.0.ts', null],
+      ['app.vue', 'declare const value: string;\nvalue.x;\n'],
+    ];
+    const { tsgo: expected, ours: actual } = await watchWithMappers(['--watch'], steps, files);
+    assert.equal(actual.output, expected.output);
+    assert.deepEqual(actual.requests, expected.requests);
+    assert.deepEqual(expected.requests[supplementalMapper], [
+      'initialize',
+      'openProject',
+      ...Array(4).fill('transform'),
+    ]);
+    assert.match(expected.output, /app\.vue\.0\.ts' conflicts with an existing file/);
+    assert.match(expected.output, /app\.vue\(2,7\): error TS2339/);
+  },
+);
+
+// A mapper of two projects of a build runs until neither has it: the config of one project loses the mapper,
+// then that of the other, and the first gets it back. Then the mapper's package, linked from elsewhere, goes.
+// The projects are built one at a time, so that tsgo asks the mapper in one order.
+test(
+  '--build --watch keeps a content mapper while a project has it',
+  { skip: skipMappers, timeout: 300_000 },
+  async () => {
+    const mapped = mappedConfig(mappedOptions, '.vue');
+    const plain = JSON.stringify({ compilerOptions: mappedOptions, files: ['index.ts'] });
+    const files = {
+      'tsconfig.json': '{"files":[],"references":[{"path":"a"},{"path":"b"}]}',
+      'a/tsconfig.json': mapped,
+      'a/app.vue': 'export const a = 1;\n',
+      'a/index.ts': 'export {};\n',
+      'b/tsconfig.json': mapped,
+      'b/app.vue': 'export const b = 1;\n',
+      'b/index.ts': 'export {};\n',
+      'packages/mapper/package.json': mapperPackage(verbatimMapper),
+    };
+    const steps = [
+      ['a/app.vue', 'export const a: string = 1;\n'],
+      ['a/tsconfig.json', plain],
+      ['b/tsconfig.json', plain],
+      ['a/tsconfig.json', mapped],
+      ['packages/mapper/package.json', null],
+    ];
+    const prepare = (dir) => writeLinks(dir, { 'node_modules/mapper': '../packages/mapper' });
+    const args = ['--build', '--watch', '--builders', '1'];
+    const { tsgo: expected, ours: actual } = await watchWithMappers(args, steps, files, prepare);
+    assert.equal(actual.output, expected.output);
+    assert.deepEqual(actual.requests, expected.requests);
+    assert.deepEqual(
+      expected.requests[verbatimMapper],
+      [
+        // Both projects, the edit, and the two configs: the mapper ends with the second.
+        ['initialize', 'openProject', 'transform', 'openProject', 'transform', 'transform'],
+        ['closeProject', 'closeProject'],
+        ['initialize', 'openProject', 'transform', 'closeProject'],
+      ].flat(),
+    );
+    assert.match(expected.output, /The content mapper package 'mapper' could not be resolved/);
+  },
+);
+
+// A mapper with configuration of its own that cannot start is reported each time tsgo's watcher asks it which
+// files to watch: before it loads a program, and twice more before it builds for a change.
+test(
+  '--watch reports a content mapper that cannot start as often as tsgo',
+  { skip: skipMappers, timeout: 300_000 },
+  async () => {
+    const files = {
+      'tsconfig.json': mappedConfig(watchedOptions, '.vue'),
+      'app.vue': 'export const app = 1;\n',
+      'main.ts': 'export const m = 1;\n',
+      'node_modules/mapper/package.json': mapperPackage('missing-mapper', { dynamicConfig: true }),
+    };
+    const steps = [inPlace({ 'main.ts': 'export const m = 2;\n' }), ['app.vue', 'export const app = 2;\n']];
+    const { tsgo: expected, ours: actual } = await watchWithMappers(['--watch'], steps, files);
+    assert.equal(actual.output, expected.output);
+    assert.deepEqual(actual.requests, {});
+    // The first build, an edit that keeps the program, for which the mapper is not asked again, and one that loads it.
+    assert.equal((expected.output.match(/error TS18099/g) ?? []).length, 1 + 2 + 3);
+  },
+);
+
+// A watch writes the identities of its content mappers into build info as a compile does, and an empty list for a
+// project without mappers that could run some, where a compile writes none.
+test(
+  '--watch writes the identities of content mappers into build info',
+  { skip: skipMappers, timeout: 300_000 },
+  async () => {
+    const options = { ...mappedOptions, noLib: true };
+    for (const config of [
+      mappedConfig(options, '.vue'),
+      JSON.stringify({ compilerOptions: options, files: ['main.ts'] }),
+    ]) {
+      const files = {
+        'tsconfig.json': config,
+        'app.vue': 'export const app = 1;\n',
+        'main.ts': 'export const m = 1;\n',
+        'node_modules/mapper/package.json': mapperPackage(verbatimMapper),
+      };
+      const buildInfo = {};
+      for (const [which, command] of [
+        ['tsgo', [tsgo]],
+        ['ours', tscTs],
+      ]) {
+        let dir;
+        const extraEnv = { TSC_TS_WATCH_MEMORY: '0' };
+        await watchSequence(['--watch', external], [], files, (d) => (dir = d), extraEnv, command);
+        buildInfo[which] = normalize(readFileSync(join(dir, 'tsconfig.tsbuildinfo'), 'utf8'), dir);
+      }
+      assert.equal(buildInfo.ours, buildInfo.tsgo);
+      assert.match(buildInfo.tsgo, /"contentMapperIdentities":\[("mapper@1\.0\.0:[0-9a-f]{32}")?\]/);
+    }
   },
 );

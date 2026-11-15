@@ -14,17 +14,54 @@ const { parseBuildInfo, buildInfoToJson } = await import(pathToFileURL(join(out,
 test('build info text written by the writer reads back to the same text', () => {
   const text =
     '{"version":"7.0.2","errors":true,"root":[[2,3],4],"packageJsons":["./node_modules/a/package.json"],' +
-    '"missingPackageJsons":["./node_modules/b/package.json"],"fileNames":["lib.es5.d.ts","./src/a.ts",' +
+    '"missingPackageJsons":["./node_modules/b/package.json"],"contentMapperIdentities":["mapper@1.0.0:0f","other"],' +
+    '"fileNames":["lib.es5.d.ts","./src/a.ts",' +
     '"./src/b.ts","./src/c \\"q\\" é.ts"],"fileInfos":["v1",{"version":"v2","signature":"s2"},' +
     '{"version":"v3","affectsGlobalScope":true,"impliedNodeFormat":99}],"fileIdsList":[[2,3],[4]],' +
     '"options":{"strict":true},"referencedMap":[[2,1],[3,2]],"semanticDiagnosticsPerFile":[1,[2,' +
-    '[{"pos":3,"end":5,"code":2322,"category":1,"messageKey":"k","messageArgs":["x"]}]]],' +
+    '[{"pos":3,"end":5,"code":2322,"category":1,"messageKey":"k","messageArgs":["x"]},' +
+    // A diagnostic of an external source: its prefix and text, and no key.
+    '{"end":4,"code":2578,"category":1,"source":"box","messageText":"nothing \\"here\\" é"}]]],' +
     '"changeFileSet":[3],"affectedFilesPendingEmit":[2,[3,17]]}';
   const buildInfo = parseBuildInfo(text);
   assert.ok(buildInfo !== undefined);
   assert.deepEqual(buildInfo.fileIdsList, [[2, 3], [4]]);
   assert.deepEqual(buildInfo.fileNames, ['lib.es5.d.ts', './src/a.ts', './src/b.ts', './src/c "q" é.ts']);
+  assert.deepEqual(buildInfo.contentMapperIdentities, ['mapper@1.0.0:0f', 'other']);
+  const external = buildInfo.semanticDiagnosticsPerFile[1].diagnostics.diagnostics[1];
+  assert.deepEqual([external.source, external.messageText, external.messageKey], ['box', 'nothing "here" é', '']);
   assert.equal(buildInfoToJson(buildInfo), text);
+});
+
+test('the identities of content mappers are a list, an empty list or left out, and compare as lists', () => {
+  // tsgo writes the list of a project that could run content mappers and has none, and leaves it out for one
+  // that could not run any; a build info without the list matches a project without mappers either way.
+  for (const text of ['{"version":"7.0.2"}', '{"version":"7.0.2","contentMapperIdentities":[]}'])
+    assert.equal(buildInfoToJson(parseBuildInfo(text)), text);
+  const none = parseBuildInfo('{"version":"7.0.2"}');
+  const empty = parseBuildInfo('{"contentMapperIdentities":[]}');
+  const two = parseBuildInfo('{"contentMapperIdentities":["a","b"]}');
+  assert.equal(none.contentMapperIdentities, undefined);
+  assert.deepEqual(empty.contentMapperIdentities, []);
+  for (const buildInfo of [none, empty]) {
+    assert.equal(buildInfo.contentMapperIdentitiesMatch(undefined), true);
+    assert.equal(buildInfo.contentMapperIdentitiesMatch([]), true);
+    assert.equal(buildInfo.contentMapperIdentitiesMatch(['a']), false);
+  }
+  assert.equal(two.contentMapperIdentitiesMatch(['a', 'b']), true);
+  for (const current of [undefined, [], ['a'], ['b', 'a'], ['a', 'b', 'c'], ['a', 'c']])
+    assert.equal(two.contentMapperIdentitiesMatch(current), false, String(current));
+  // A repeated key takes its last value, and a value of the wrong type makes the text invalid.
+  assert.deepEqual(
+    parseBuildInfo('{"contentMapperIdentities":["a"],"contentMapperIdentities":["b"]}').contentMapperIdentities,
+    ['b'],
+  );
+  for (const text of [
+    '{"contentMapperIdentities":"a"}',
+    '{"contentMapperIdentities":[1]}',
+    '{"contentMapperIdentities":{}}',
+  ])
+    assert.equal(parseBuildInfo(text), undefined, text);
 });
 
 test('fields read straight from the text and through JSON values agree', () => {
@@ -83,7 +120,7 @@ test('diagnostics read straight from the text and through JSON values agree', ()
       : JSON.parse(JSON.stringify([buildInfo.semanticDiagnosticsPerFile, buildInfo.emitDiagnosticsPerFile]));
   };
   const d =
-    '"pos":1,"end":2,"code":3,"category":1,"messageKey":"k","messageArgs":["a","b"],' +
+    '"pos":1,"end":2,"code":3,"category":1,"source":"s","messageText":"t","messageKey":"k","messageArgs":["a","b"],' +
     '"messageChain":[{"code":4,"messageKey":"c","messageChain":[{"code":5}]}],"relatedInformation":[{"file":2,"pos":5,"noFile":true}],' +
     '"reportsUnnecessary":true,"reportsDeprecated":false,"skippedOnNoEmit":true,' +
     '"repopulateInfo":{"kind":1,"moduleReference":"m","mode":99,"packageName":"p"}';
@@ -92,11 +129,16 @@ test('diagnostics read straight from the text and through JSON values agree', ()
   const direct = read(both(d));
   assert.ok(direct !== undefined);
   assert.equal(direct[0][1].diagnostics.diagnostics[0].messageChain[0].messageChain[0].code, 5);
+  assert.deepEqual(
+    [direct[0][1].diagnostics.diagnostics[0].source, direct[0][1].diagnostics.diagnostics[0].messageText],
+    ['s', 't'],
+  );
   // An unknown key, which is left out, makes the diagnostics go through JSON values.
   assert.deepEqual(read(both(d + ',"other":[1]')), direct);
   assert.deepEqual(read(both(d.replace('"code":3', '"code":3,"other":{}'))), direct);
   // A repeated key takes its last value.
   assert.deepEqual(read(both(d.replace('"code":3', '"code":9,"code":3'))), direct);
+  assert.deepEqual(read(both(d.replace('"source":"s"', '"source":"x","messageText":"y","source":"s"'))), direct);
   assert.deepEqual(
     read(both(d.replace('"repopulateInfo":{"kind":1', '"repopulateInfo":{"kind":7,"other":0,"kind":1'))),
     direct,
@@ -105,6 +147,8 @@ test('diagnostics read straight from the text and through JSON values agree', ()
   for (const text of [
     both(d.replace('"code":3', '"code":"3"')),
     both(d.replace('"noFile":true', '"noFile":1')),
+    both(d.replace('"source":"s"', '"source":1')),
+    both(d.replace('"messageText":"t"', '"messageText":["t"]')),
     both(d.replace('"messageArgs":["a","b"]', '"messageArgs":"a"')),
     both(d.replace('"kind":1', '"kind":"1"')),
     '{"semanticDiagnosticsPerFile":[[2]]}',
