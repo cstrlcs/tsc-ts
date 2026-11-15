@@ -184,16 +184,30 @@ const allSupportedExtensions: readonly (readonly string[])[] = [
 const supportedTSExtensionsWithJson: readonly (readonly string[])[] = [...supportedTSExtensions, ['.json']];
 const allSupportedExtensionsWithJson: readonly (readonly string[])[] = [...allSupportedExtensions, ['.json']];
 
-/** Extensions of root files, in priority groups. */
-export function getSupportedExtensions(options: CompilerOptions): readonly (readonly string[])[] {
-  return getAllowJS(options) ? allSupportedExtensions : supportedTSExtensions;
+/**
+ * Extensions of root files, in priority groups. Each of `extraExtensions`, the extensions content mappers
+ * register, is a group of its own after the built-in ones.
+ */
+export function getSupportedExtensions(
+  options: CompilerOptions,
+  extraExtensions: readonly string[] = [],
+): readonly (readonly string[])[] {
+  const builtins = getAllowJS(options) ? allSupportedExtensions : supportedTSExtensions;
+  const groups: (readonly string[])[] = [];
+  for (const extension of extraExtensions)
+    if (!builtins.some((group) => group.includes(extension))) groups.push([extension]);
+  return groups.length === 0 ? builtins : [...builtins, ...groups];
 }
 
+/** `supportedExtensions`, the result of `getSupportedExtensions` for `options`, with `.json` under `resolveJsonModule`. */
 export function getSupportedExtensionsWithJsonIfResolveJsonModule(
   options: CompilerOptions,
+  supportedExtensions: readonly (readonly string[])[],
 ): readonly (readonly string[])[] {
-  if (!getResolveJsonModule(options)) return getSupportedExtensions(options);
-  return getAllowJS(options) ? allSupportedExtensionsWithJson : supportedTSExtensionsWithJson;
+  if (!getResolveJsonModule(options)) return supportedExtensions;
+  if (supportedExtensions === allSupportedExtensions) return allSupportedExtensionsWithJson;
+  if (supportedExtensions === supportedTSExtensions) return supportedTSExtensionsWithJson;
+  return [...supportedExtensions, ['.json']];
 }
 
 export function flattenExtensions(groups: readonly (readonly string[])[]): string[] {
@@ -277,6 +291,13 @@ export class TsConfigSourceFile {
   constructor(readonly sourceFile: SourceFile) {}
 }
 
+/** The file extensions `mappers` register, in their order. */
+function contentMapperExtensionsOf(mappers: readonly ContentMapper[]): string[] {
+  const extensions: string[] = [];
+  for (const mapper of mappers) for (const extension of mapper.definition.extensions ?? []) extensions.push(extension);
+  return extensions;
+}
+
 /** Options, root files and references of a project, from a config file or the command line. */
 export class ParsedCommandLine implements OutputPathsHost {
   /** The config file name, or `''`. */
@@ -325,10 +346,7 @@ export class ParsedCommandLine implements OutputPathsHost {
 
   /** The file extensions the content mappers register. */
   contentMapperExtensions(): string[] {
-    const extensions: string[] = [];
-    for (const mapper of this.contentMappers)
-      for (const extension of mapper.definition.extensions ?? []) extensions.push(extension);
-    return extensions;
+    return contentMapperExtensionsOf(this.contentMappers);
   }
 
   /**
@@ -1377,6 +1395,7 @@ export class ConfigParser {
           basePathForFileNames,
           options,
           literalFiles,
+          contentMapperExtensionsOf(contentMappers),
           beforeRootFiles === undefined ? undefined : beforeRootFiles(options),
         )
       : [];
@@ -1853,14 +1872,16 @@ export class ConfigParser {
     basePath: string,
     options: CompilerOptions,
     literalFiles: Map<string, string>,
+    /** The extensions content mappers register, which `include` matches as it matches the built-in ones. */
+    extraExtensions: readonly string[],
     onRootFile?: (fileName: string) => void,
   ): string[] {
     basePath = normalizePath(basePath);
     const cs = this.fs.useCaseSensitiveFileNames;
     const wildcardFiles = new Map<string, string>();
     const wildcardJsonFiles = new Map<string, string>();
-    const supportedExtensions = getSupportedExtensions(options);
-    const extensionsWithJson = getSupportedExtensionsWithJsonIfResolveJsonModule(options);
+    const supportedExtensions = getSupportedExtensions(options, extraExtensions);
+    const extensionsWithJson = getSupportedExtensionsWithJsonIfResolveJsonModule(options, supportedExtensions);
     // Literal files are keyed by path, so `a.ts` and `./a.ts` are one file, also when `include` matches it.
     for (const fileName of specs.validatedFilesSpec) {
       const file = getNormalizedAbsolutePath(fileName, basePath);

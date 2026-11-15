@@ -2,7 +2,11 @@
 // Each fixture is a set of files and the argument lists to run in its directory.
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseTestCase } from './module-resolution-cases.mjs';
+
+/** A content mapper process that answers as its argument says (content-mapper-scripted.mjs). */
+const scriptedMapper = fileURLToPath(new URL('./content-mapper-scripted.mjs', import.meta.url));
 
 const listArgs = [['--listFilesOnly'], ['--explainFiles', '--listFilesOnly'], ['--showConfig']];
 
@@ -10,10 +14,13 @@ function json(value) {
   return JSON.stringify(value, null, 2);
 }
 
-/** @returns {{ name: string, files: Record<string, string>, args?: string[][], symlinks?: Record<string, string> }[]} */
+/**
+ * A project's `env` holds environment variables for its runs.
+ * @returns {{ name: string, files: Record<string, string>, args?: string[][], symlinks?: Record<string, string>, env?: Record<string, string> }[]}
+ */
 export function fixtureProjects() {
   const fixtures = [];
-  const add = (name, files, args = listArgs) => fixtures.push({ name, files, args });
+  const add = (name, files, args = listArgs, env = {}) => fixtures.push({ name, files, args, env });
 
   // ---- extends
   add('extends-relative', {
@@ -845,6 +852,214 @@ export function fixtureProjects() {
       ...mapperArgs.map((args) => ['-p', 'last', ...args]),
     ],
   );
+
+  // ---- content mapped files. The test puts the mappers of content-mappers.mjs on PATH, by the names of their
+  // `exec`; a scripted mapper is run by its file name.
+  const loadArgs = [
+    ['--listFilesOnly', '--runExternalCode'],
+    ['--explainFiles', '--listFilesOnly', '--runExternalCode'],
+    ['--showConfig', '--runExternalCode'],
+    ['--listFilesOnly', '--traceResolution', '--runExternalCode'],
+  ];
+  const boxMapper = mapperPackage('mapper', { exec: ['compiler-test-mapper'] });
+  const scripted = (name, script, contentMapper = {}) =>
+    mapperPackage(name, { exec: [process.execPath, scriptedMapper, JSON.stringify(script)], ...contentMapper });
+  for (const compilerOptions of [
+    { module: 'esnext', moduleResolution: 'bundler' },
+    { module: 'esnext', moduleResolution: 'bundler', allowJs: true, resolveJsonModule: true },
+  ])
+    add(
+      `content-mapper-files${compilerOptions.allowJs ? '-with-js-and-json' : ''}`,
+      {
+        'tsconfig.json': json({
+          compilerOptions,
+          contentMappers: [{ package: 'mapper', extensions: ['.box', '.module.box'] }],
+          files: ['listed.box', 'notes.txt'],
+          include: ['src', 'more/*.box', 'more/*.json'],
+          exclude: ['src/excluded.box'],
+        }),
+        'node_modules/mapper/package.json': boxMapper,
+        'node_modules/pkg/package.json': json({ name: 'pkg', version: '1.0.0', exports: './index.box' }),
+        'node_modules/pkg/index.box': 'export const fromPackage = 1;\n',
+        'listed.box': 'export const listed = 1;\n',
+        'notes.txt': '',
+        'src/a.box':
+          'import { b } from "./b.module.box";\nimport { c } from "./c";\nimport "./excluded.box";\nexport const a = [b, c];\n',
+        'src/b.module.box': 'export const b = 1;\n',
+        'src/c.ts':
+          'import "./a.box";\nimport "./a";\nimport "./b.module";\nimport "./missing.box";\nimport "./UPPER.box";\nimport "pkg";\nexport const c = 1;\n',
+        'src/excluded.box': 'export const excluded = 1;\n',
+        'src/UPPER.BOX': 'export const upper = 1;\n',
+        'src/script.js': 'export const script = 1;\n',
+        'more/e.box': 'export const e = 1;\n',
+        'more/f.module.box': 'export const f = 1;\n',
+        'more/g.ts': 'export const g = 1;\n',
+        'more/data.json': '{}\n',
+      },
+      loadArgs,
+    );
+  add(
+    'content-mapper-cannot-start',
+    {
+      'tsconfig.json': json({ contentMappers: [{ package: 'mapper', extensions: ['.box'] }] }),
+      'node_modules/mapper/package.json': mapperPackage('mapper'),
+      'a.box': 'export const a = 1;\n',
+      'b.box': 'export const b = 1;\n',
+      'main.ts': 'import { a } from "./a.box";\nimport { b } from "./b.box";\nexport const c = [a, b];\n',
+    },
+    loadArgs,
+  );
+  // A mapper may fail five transforms: the sixth and seventh file are in the program without a diagnostic.
+  add(
+    'content-mapper-failure-budget',
+    {
+      'tsconfig.json': json({ contentMappers: [{ package: 'mapper', extensions: ['.box'] }] }),
+      'node_modules/mapper/package.json': mapperPackage('mapper', { exec: ['failing-mapper'] }),
+      ...Object.fromEntries([1, 2, 3, 4, 5, 6, 7].map((n) => [`f${n}.box`, `export const f${n} = ${n};\n`])),
+    },
+    loadArgs,
+  );
+  // The offsets of an invalid span map are those of the output it came with, in UTF-8: here the supplemental
+  // output, whose text has more bytes before the mapping than the canonical output's and the original's.
+  add(
+    'content-mapper-invalid-span-maps',
+    {
+      'tsconfig.json': json({
+        contentMappers: [
+          { package: 'mismatch', extensions: ['.mismatch'] },
+          { package: 'overlap', extensions: ['.overlap'] },
+          { package: 'bounds', extensions: ['.bounds'] },
+          { package: 'unmapped', extensions: ['.unmapped'] },
+        ],
+      }),
+      'node_modules/mismatch/package.json': scripted('mismatch', {
+        transform: {
+          text: 'a\u00e91234',
+          extension: '.ts',
+          mappings: [[0, 7, 0, 7, 0]],
+          supplemental: [{ text: '\u00e9\u00e9\u00e99zz', extension: '.ts', mappings: [[6, 1, 3, 1, 0]] }],
+        },
+      }),
+      'node_modules/overlap/package.json': scripted('overlap', {
+        transform: {
+          text: '\u00e9\u00e9 1234',
+          extension: '.ts',
+          mappings: [
+            [5, 2, 3, 2, 1],
+            [6, 1, 5, 1, 1],
+          ],
+        },
+      }),
+      'node_modules/bounds/package.json': scripted('bounds', {
+        transform: { text: '\u00e9\u00e9 1234', extension: '.ts', mappings: [[5, 2, 6, 9, 1]] },
+      }),
+      'node_modules/unmapped/package.json': scripted('unmapped', {}),
+      'a.mismatch': 'a\u00e91234',
+      'a.overlap': 'a\u00e91234',
+      'a.bounds': 'a\u00e91234',
+      'a.unmapped': 'export {};\n',
+    },
+    loadArgs,
+  );
+  add(
+    'content-mapper-project-errors',
+    {
+      'tsconfig.json': json({
+        contentMappers: [
+          { package: 'identity', extensions: ['.identity'] },
+          { package: 'dynamic', extensions: ['.dynamic'] },
+          { package: 'encoding', extensions: ['.encoding'] },
+          { package: 'reserved', extensions: ['.reserved'] },
+        ],
+      }),
+      'node_modules/identity/package.json': scripted('identity', { openProject: { configIdentity: 'x' } }),
+      'node_modules/dynamic/package.json': scripted('dynamic', { openProject: {} }, { dynamicConfig: true }),
+      'node_modules/encoding/package.json': scripted('encoding', { initialize: { positionEncoding: 'utf-32' } }),
+      'node_modules/reserved/package.json': scripted('reserved', {
+        initialize: { positionEncoding: 'utf-8', diagnosticSource: 'TS' },
+      }),
+      'a.identity': 'export {};\n',
+      'a.dynamic': 'export {};\n',
+      'a.encoding': 'export {};\n',
+      'b.encoding': 'export {};\n',
+      'a.reserved': 'export {};\n',
+    },
+    loadArgs,
+  );
+  // The test mappers report the name of a plugin that is not a string, at its value in the config file. A project
+  // that transforms no file opens no mapper project and gets no such diagnostic. tsgo ends with a nil pointer
+  // dereference where the mappers come from a config the project's config extends, which is not compared.
+  add(
+    'content-mapper-option-diagnostics',
+    {
+      'tsconfig.json': json({
+        contentMappers: [{ package: 'mapper', extensions: ['.box'], options: { plugins: [{ name: 1 }] } }],
+      }),
+      'unused/tsconfig.json': json({ extends: '../tsconfig.json', files: ['../main.ts'] }),
+      'node_modules/mapper/package.json': boxMapper,
+      'a.box': 'export const a = 1;\n',
+      'main.ts': 'export {};\n',
+    },
+    [...loadArgs, ...loadArgs.map((args) => ['-p', 'unused', ...args])],
+  );
+  // With TS_CONTENT_MAPPER_DEBUG the compilers write each message they exchange with a mapper to standard error:
+  // the requests, with the project's compiler options, and the responses. One mapper and one file, since tsgo
+  // writes the messages of several in no fixed order.
+  add(
+    'content-mapper-messages',
+    {
+      'tsconfig.json': json({
+        compilerOptions: { strict: true, target: 'es2022', paths: { 'x/*': ['./x/*'] }, types: ['a', 'b'] },
+        contentMappers: [{ package: 'mapper', extensions: ['.box'], options: { deep: [1, 'two', { three: null }] } }],
+      }),
+      'node_modules/mapper/package.json': boxMapper,
+      'a.box': 'export const strict = #{strict};\nexport const open = #{target\n',
+    },
+    [['--listFilesOnly', '--runExternalCode']],
+    { TS_CONTENT_MAPPER_DEBUG: '1' },
+  );
+  // The virtual extension a mapper gives a file decides its module format, and with it how its imports resolve.
+  add(
+    'content-mapper-module-formats',
+    {
+      'tsconfig.json': json({
+        compilerOptions: { module: 'nodenext' },
+        contentMappers: [{ package: 'mapper', extensions: ['.box'] }],
+      }),
+      'package.json': json({ name: 'app', type: 'module' }),
+      'node_modules/mapper/package.json': boxMapper,
+      'node_modules/dual/package.json': json({
+        name: 'dual',
+        version: '1.0.0',
+        exports: { import: './esm.d.mts', require: './cjs.d.cts' },
+      }),
+      'node_modules/dual/esm.d.mts': 'export declare const esm: number;\n',
+      'node_modules/dual/cjs.d.cts': 'export declare const cjs: number;\n',
+      'plain.box': 'import "dual";\nexport const plain = 1;\n',
+      'module.box': '// @box-extension: .mts\nimport "dual";\nexport const esm = 1;\n',
+      'common.box': '// @box-extension: .cts\nimport "dual";\nexport const cjs = 1;\n',
+      'script.box': '// @box-extension: .js\nimport "dual";\n',
+      'cjs/package.json': json({ type: 'commonjs' }),
+      'cjs/plain.box': 'import "dual";\nexport const plain = 1;\n',
+    },
+    loadArgs,
+  );
+  // A supplemental virtual file is listed in a composite project when its canonical file is.
+  add(
+    'content-mapper-composite',
+    {
+      'tsconfig.json': json({
+        compilerOptions: { composite: true, module: 'esnext', moduleResolution: 'bundler' },
+        contentMappers: [{ package: 'mapper', extensions: ['.astro'] }],
+        files: ['listed.astro', 'main.ts'],
+      }),
+      'node_modules/mapper/package.json': mapperPackage('mapper', { exec: ['supplemental-mapper'] }),
+      'listed.astro': 'export const listed = 1;\n',
+      'unlisted.astro': 'export const unlisted = 1;\n',
+      'main.ts': 'import "./listed.astro";\nimport "./unlisted.astro";\n',
+    },
+    loadArgs,
+  );
   return fixtures;
 }
 
@@ -898,7 +1113,16 @@ function optionValue(declaration, raw) {
  * Runs of test cases that tsc-ts answers differently from tsgo: the cases, the argument their differing runs
  * have, and what the differences the test finds must match. The comment of each entry gives the reason.
  */
-const differingRuns = [];
+const differingRuns = [
+  // The name a content mapper's `outputExtensions` gives the output of a mapped file is one of the output paths
+  // of mapped files, which tsc-ts does not compute yet: it does not report TS5056 where another file has that output.
+  {
+    name: /^compiler\/contentMapperOutputExtensionsCollision\.ts$/,
+    arg: '--listFilesOnly',
+    difference:
+      /^stdout line 1: tsgo "error TS5056: Cannot write file '\/dist\/component\.js' because it would be overwritten by multiple input files\.", ours "[^"]*"\nstatus tsgo 1, ours 0$/,
+  },
+];
 
 /**
  * Projects from TypeScript's multi-file test cases. Cases with a tsconfig.json are run with it; others get one with
@@ -946,8 +1170,10 @@ export function testCaseProjects(testsRoot, declarations) {
     if (unusable) continue;
     const projectCwd = toProjectPath('.', cwd);
     const name = testFile.slice(testsRoot.length + 1);
+    // A case that lets its content mappers run: the test puts the mappers of content-mappers.mjs on PATH.
+    const external = parsed.options.runexternalcode === 'true' ? ['--runExternalCode'] : [];
     if (configFile !== undefined) {
-      const project = ['-p', relativeTo(projectCwd, configFile)];
+      const project = ['-p', relativeTo(projectCwd, configFile), ...external];
       projects.push({
         name,
         files,
@@ -986,9 +1212,11 @@ export function testCaseProjects(testsRoot, declarations) {
       symlinks,
       cwd: projectCwd,
       args: [
-        ['--explainFiles', '--listFilesOnly'],
-        ['--showConfig'],
-        ...(/node_modules|package\.json|@trace/i.test(code) ? [['--listFilesOnly', '--traceResolution']] : []),
+        ['--explainFiles', '--listFilesOnly', ...external],
+        ['--showConfig', ...external],
+        ...(/node_modules|package\.json|@trace/i.test(code)
+          ? [['--listFilesOnly', '--traceResolution', ...external]]
+          : []),
       ],
     });
   }

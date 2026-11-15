@@ -1,15 +1,17 @@
 // Compares tsconfig.json handling and program construction with tsgo (packages/tsgo/dist/tsgo): fixture projects
 // and projects from TypeScript's test cases, run with --listFilesOnly, --explainFiles, --showConfig and
 // --traceResolution. stdout, stderr and exit status must match exactly, except in the runs program-cases.mjs lists as
-// differing from tsgo, which must differ as listed.
+// differing from tsgo, which must differ as listed. Both compilers find the content mappers of TypeScript's test
+// cases on PATH, as processes (content-mapper-server.mjs); a case that lets them run is given --runExternalCode.
 // Set TSC_TS_CLI to a native build of src/drivers/cli.ts to test it instead of the JS build, PROGRAM_FILTER to
 // a substring of project names to run only those, and PROGRAM_SHARD to `i/n` to run every nth run starting at the ith.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { writeMapperLaunchers } from './content-mapper-server.mjs';
 import { fixtureProjects, testCaseProjects } from './program-cases.mjs';
 import { compileSources, tempDir } from './temp.mjs';
 
@@ -25,6 +27,8 @@ const compileCache = process.env.NODE_COMPILE_CACHE ? { NODE_COMPILE_CACHE: proc
 const out = compileSources('tsc-ts-program-', ['drivers/cli.ts']);
 const ours = process.env.TSC_TS_CLI ? [process.env.TSC_TS_CLI] : [process.execPath, join(out, 'drivers/cli.js')];
 const decls = await import(pathToFileURL(join(out, 'compiler/option-declarations.js')).href);
+// A launcher for each content mapper of TypeScript's test cases, which a mapper's package.json names by its `exec`.
+const launchers = writeMapperLaunchers(tempDir('tsc-ts-program-mappers-'), join(out, 'compiler/span-map.js'));
 
 /** Writes a project into a fresh directory; returns the directory to run in. */
 function setUp(project) {
@@ -48,8 +52,14 @@ function setUp(project) {
   return cwd;
 }
 
-function run(command, args, cwd) {
-  const env = { PATH: process.env.PATH ?? '', TSC_TS_BUNDLED_LIBS: bundledLibs, NO_COLOR: '1', ...compileCache };
+function run(command, args, cwd, variables = {}) {
+  const env = {
+    PATH: `${launchers}${delimiter}${process.env.PATH ?? ''}`,
+    TSC_TS_BUNDLED_LIBS: bundledLibs,
+    NO_COLOR: '1',
+    ...compileCache,
+    ...variables,
+  };
   return new Promise((done) => {
     execFile(
       command[0],
@@ -105,7 +115,10 @@ async function compare(projects) {
     // Threads make tsgo's traces depend on timing (package.json lookups may or may not be cached yet), so both run
     // single-threaded.
     const runArgs = [...args, '--singleThreaded'];
-    const [expected, actual] = await Promise.all([run([tsgo], runArgs, cwd), run(ours, runArgs, cwd)]);
+    const [expected, actual] = await Promise.all([
+      run([tsgo], runArgs, cwd, project.env),
+      run(ours, runArgs, cwd, project.env),
+    ]);
     const problems = [];
     if (expected.stdout !== actual.stdout) problems.push('stdout ' + firstDifference(expected.stdout, actual.stdout));
     if (expected.stderr !== actual.stderr) problems.push('stderr ' + firstDifference(expected.stderr, actual.stderr));

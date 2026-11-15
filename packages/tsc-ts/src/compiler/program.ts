@@ -18,10 +18,13 @@ import {
   type PropertyAssignment,
   type SourceFile,
 } from './ast.js';
+import type { ContentMapper } from './content-mapper.js';
 import {
   compareDiagnostics,
   createCompilerDiagnostic,
+  createExternalDiagnostic,
   Diagnostic,
+  DiagnosticCategory,
   Diagnostics,
   equalDiagnostics,
   equalDiagnosticsNoRelatedInfo,
@@ -32,6 +35,7 @@ import {
 } from './diagnostics.js';
 import {
   canReplaceFile,
+  ContentMappedSourceFiles,
   FileLoader,
   jsxRuntimeImportOf,
   modeAwareKey,
@@ -86,6 +90,7 @@ import {
   toFileNameLowerCase,
   toPath,
   isNetworkPathValue,
+  type ExtensionRewrite,
 } from './path.js';
 import {
   getDefaultResolutionModeForFile,
@@ -102,6 +107,7 @@ import { isIdentifierText } from './scanner.js';
 import {
   diagnosticAtNode,
   findPropertyAssignment,
+  getContentMapperOptionDiagnosticLocation,
   getTsConfigObjectLiteral,
   type ParsedCommandLine,
   type SourceOutputAndProjectReference,
@@ -124,6 +130,8 @@ export class Program implements OutputPathsHost {
   readonly includeProcessor: IncludeProcessor;
   private readonly processed: ProcessedFiles;
   private readonly programDiagnosticsList: Diagnostic[] = [];
+  /** What the content mappers of the project reported about their `options` in the config file. */
+  private readonly contentMapperOptionDiagnostics: readonly Diagnostic[];
   private readonly emitBlockingPaths = new Set<string>();
   private commonSourceDirectoryValue: string | undefined = undefined;
   private packagesMap: Map<string, boolean> | undefined = undefined;
@@ -154,6 +162,7 @@ export class Program implements OutputPathsHost {
       this.processed = processed;
       this.includeProcessor = processed.includeProcessor;
       for (const diagnostic of previous.programDiagnosticsList) this.programDiagnosticsList.push(diagnostic);
+      this.contentMapperOptionDiagnostics = previous.contentMapperOptionDiagnostics;
       for (const path of previous.emitBlockingPaths) this.emitBlockingPaths.add(path);
       // The files and include reasons it takes from a program shared with checker threads are immutable, and
       // so is that program's symlink cache: this one computes its own then (`getSymlinkCache`).
@@ -166,6 +175,7 @@ export class Program implements OutputPathsHost {
       this.processed = (loader ?? new FileLoader(host, commandLine)).load();
       this.includeProcessor = this.processed.includeProcessor;
       this.verifyCompilerOptions();
+      this.contentMapperOptionDiagnostics = this.collectContentMapperOptionDiagnostics();
     }
     this.includeProcessor.noteProgramCreated();
   }
@@ -176,22 +186,76 @@ export class Program implements OutputPathsHost {
    * that is installed more than once, or no longer imports, references or needs the same modules
    * (`canReplaceFile`, and the tslib and JSX runtime imports the program kept for the file), so the program
    * must be loaded again.
+   *
+   * A file a content mapper produced is transformed again through `host`. The program must be loaded again,
+   * where its loader reports what went wrong, when the transform fails, or when the supplemental virtual
+   * files it returns are not as many as before, are not at the same paths, or cannot take the place of the
+   * ones before as the file must.
    */
   updateFile(path: string, host: CompilerHost): Program | undefined {
     const processed = this.processed;
     const file = processed.filesByPath.get(path);
     if (file === undefined) return undefined;
-    const next = host.getSourceFile(file.fileName, file.path, file.externalModuleIndicatorOptions);
+    let next: SourceFile | undefined;
+    if (file.contentMapper() === '')
+      next = host.getSourceFile(file.fileName, file.path, file.externalModuleIndicatorOptions);
+    else {
+      const mapper = this.commandLine.getContentMapperForFileName(file.fileName);
+      if (mapper === undefined) return undefined;
+      const files = host.getContentMappedSourceFiles(
+        file.fileName,
+        file.path,
+        file.externalModuleIndicatorOptions,
+        mapper,
+      );
+      if (!(files instanceof ContentMappedSourceFiles)) return undefined;
+      next = files.canonical;
+    }
     if (next === undefined) return undefined;
     if (processed.redirectFilesByPath.has(path) || processed.redirectTargets.has(path)) return undefined;
-    if (!canReplaceFile(file, next, (f, specifier) => this.getModeForUsageLocation(f, specifier))) return undefined;
-    const options = processed.projectReferenceMapper.getCompilerOptionsForFile(next.path, next.fileName);
-    if (processed.importHelpersImportSpecifiers.has(path) !== needsImportHelpersImportSpecifier(next, options))
-      return undefined;
-    const jsxImport = processed.jsxRuntimeImports.get(path);
-    if ((jsxImport === undefined ? '' : jsxImport.moduleReference) !== jsxRuntimeImportOf(next, options))
-      return undefined;
+    if (!this.canReplace(file, next)) return undefined;
+    const supplemental = file.supplementalSourceFiles();
+    const nextSupplemental = next.supplementalSourceFiles();
+    if (supplemental.length !== nextSupplemental.length) return undefined;
+    for (let i = 0; i < supplemental.length; i++)
+      if (supplemental[i].path !== nextSupplemental[i].path || !this.canReplace(supplemental[i], nextSupplemental[i]))
+        return undefined;
     return new Program(this.commandLine, host, undefined, this, withReplacedFile(processed, next));
+  }
+
+  /**
+   * Whether `next` can take the place of `file`, the file of this program at its path, without loading the
+   * program again: it is parsed with the same options, which a virtual extension that makes a file a module
+   * changes, `canReplaceFile` holds, and it needs the tslib and JSX runtime imports the program kept for `file`.
+   */
+  private canReplace(file: SourceFile, next: SourceFile): boolean {
+    const processed = this.processed;
+    const parsed = file.externalModuleIndicatorOptions;
+    const nextParsed = next.externalModuleIndicatorOptions;
+    if (parsed.jsx !== nextParsed.jsx || parsed.force !== nextParsed.force) return false;
+    if (!canReplaceFile(file, next, (f, specifier) => this.getModeForUsageLocation(f, specifier))) return false;
+    const options = processed.projectReferenceMapper.getCompilerOptionsForFile(next.path, next.fileName);
+    if (processed.importHelpersImportSpecifiers.has(file.path) !== needsImportHelpersImportSpecifier(next, options))
+      return false;
+    const jsxImport = processed.jsxRuntimeImports.get(file.path);
+    return (jsxImport === undefined ? '' : jsxImport.moduleReference) === jsxRuntimeImportOf(next, options);
+  }
+
+  /** The content mapper of the project that produced `file`, or `undefined` if no content mapper did. */
+  getContentMapper(file: SourceFile): ContentMapper | undefined {
+    if (file.contentMapper() === '') return undefined;
+    const mapper = this.commandLine.getContentMapperForFileName(file.fileName);
+    return mapper !== undefined && mapper.identity() === file.contentMapper() ? mapper : undefined;
+  }
+
+  /** The file extensions the project's content mappers register. */
+  contentMapperExtensions(): string[] {
+    return this.commandLine.contentMapperExtensions();
+  }
+
+  /** See `ParsedCommandLine.contentMapperExtensionRewrites`. */
+  contentMapperExtensionRewrites(): readonly ExtensionRewrite[] {
+    return this.commandLine.contentMapperExtensionRewrites();
   }
 
   /** Libraries first, then the other files in the order they were found. */
@@ -614,13 +678,52 @@ export class Program implements OutputPathsHost {
     return sortAndDeduplicateDiagnostics(result);
   }
 
-  /** Option errors and file inclusion errors without a location in a source file. */
+  /**
+   * Option errors, the failures of content mappers that are not those of one file, what content mappers
+   * reported about their options, and file inclusion errors without a location in a source file.
+   */
   getProgramDiagnostics(): Diagnostic[] {
-    const result = [...this.programDiagnosticsList];
+    const result = [
+      ...this.programDiagnosticsList,
+      ...this.processed.contentMapperDiagnostics,
+      ...this.contentMapperOptionDiagnostics,
+    ];
     for (const diagnostic of this.includeProcessor.diagnostics(this)) {
       if (diagnostic.file === undefined) result.push(diagnostic);
     }
     return sortAndDeduplicateDiagnostics(result);
+  }
+
+  /**
+   * The failures of content mappers that are not those of one file: a mapper that could not be initialized,
+   * and one that failed so often that the rest of its files were not transformed. They are part of
+   * `getProgramDiagnostics`; a caller that reports syntax errors alone reports these with them, since each
+   * failed transform is a syntax error of its file.
+   */
+  getContentMapperDiagnostics(): readonly Diagnostic[] {
+    return this.processed.contentMapperDiagnostics;
+  }
+
+  /** The diagnostics the mapper projects that loading opened have about the `options` of their entries. */
+  private collectContentMapperOptionDiagnostics(): Diagnostic[] {
+    const project = this.host.contentMapperProject;
+    if (project === undefined) return [];
+    const result: Diagnostic[] = [];
+    for (const diagnostic of project.diagnostics()) {
+      const location = getContentMapperOptionDiagnosticLocation(this.commandLine, diagnostic.mapper, diagnostic.path);
+      result.push(
+        createExternalDiagnostic(
+          location === undefined ? undefined : location.file.diagnosticFile(),
+          location === undefined ? -1 : location.pos,
+          location === undefined ? -1 : location.end,
+          diagnostic.source,
+          DiagnosticCategory.Error,
+          diagnostic.code,
+          diagnostic.messageText,
+        ),
+      );
+    }
+    return result;
   }
 
   /** File inclusion errors located in `file`, reported with its semantic diagnostics. */
@@ -892,7 +995,10 @@ export class Program implements OutputPathsHost {
       const rootPaths = new Set<string>();
       for (const fileName of this.commandLine.fileNames) rootPaths.add(this.toPath(fileName));
       for (const file of this.processed.files) {
-        if (this.sourceFileMayBeEmitted(file, false) && !rootPaths.has(file.path)) {
+        // A supplemental virtual file is listed when its canonical file is.
+        const canonical = file.canonicalSourceFile();
+        const rootPath = canonical === undefined ? file.path : canonical.path;
+        if (this.sourceFileMayBeEmitted(file, false) && !rootPaths.has(rootPath)) {
           this.includeProcessor.addProcessingDiagnostic(
             ProcessingDiagnostic.explainingFileInclude(
               file.path,

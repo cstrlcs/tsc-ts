@@ -169,7 +169,9 @@ jobs:
         run: |
           npm run build:native > "$RUNNER_TEMP/tsc.log" 2>&1 &
           tsc=$!
-          npx scriptc build src/drivers/cli.ts --optimization=speed --no-keep-llvm -o dist/cli > "$RUNNER_TEMP/cli.log" 2>&1 &
+          # The driver links the processes of content mappers (native/spawn-posix.c), which the build above compiles first.
+          while [ ! -f dist/spawn-posix.o ] && kill -0 $tsc 2> /dev/null; do sleep 1; done
+          npx scriptc build src/drivers/cli.ts --optimization=speed --no-keep-llvm --ffi native/spawn-posix.ffi.json -o dist/cli > "$RUNNER_TEMP/cli.log" 2>&1 &
           cli=$!
           status=0
           wait $tsc || { status=1; cat "$RUNNER_TEMP/tsc.log"; }

@@ -8,8 +8,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { writeMapperLaunchers } from './content-mapper-server.mjs';
 import { compileSources, tempDir } from './temp.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -472,4 +473,80 @@ test('a program with a redirect to another copy of a package takes the parse thr
   assert.ok(shared.program.hasAllPackageJsonLookups());
   assert.deepEqual(lookups(shared.program), lookups(plain.program));
   assert.ok(lookups(plain.program).some((l) => l.includes('only-here')));
+});
+
+// A parse thread has no content mappers: it leaves a file with an extension a mapper registers, and the files
+// only such a file imports, to the program's loader, whose host runs the mappers, and resolves an import of a
+// mapped file as the program does. The mappers are those of TypeScript's test cases, as processes.
+test('a parse thread leaves content mapped files to the program, which is the same program', () => {
+  const dir = tempDir('tsc-ts-parallel-load-mapped-');
+  const mapper = (name, exec) =>
+    JSON.stringify({ name, version: '1.0.0', typescript: { contentMapper: { exec: [exec] } } });
+  const files = {
+    'tsconfig.json': JSON.stringify({
+      compilerOptions: {
+        strict: true,
+        noEmit: true,
+        module: 'esnext',
+        moduleResolution: 'bundler',
+        lib: ['es2022'],
+        types: [],
+      },
+      contentMappers: [
+        { package: 'box', extensions: ['.box'] },
+        { package: 'supplemental', extensions: ['.astro'] },
+      ],
+      include: ['src'],
+    }),
+    'node_modules/box/package.json': mapper('box', 'compiler-test-mapper'),
+    'node_modules/supplemental/package.json': mapper('supplemental', 'supplemental-mapper'),
+    'src/a.ts':
+      "import { b } from './b.box';\nimport './c.astro';\nimport { d } from './d';\nexport const a: string = b + d;\n",
+    'src/b.box': "import { e } from '../lib/e';\nexport const b = e + #{strict};\n",
+    'src/c.astro': "const c: number = 'c';\n",
+    'src/d.ts': "import { b } from './b.box';\nexport const d = b;\n",
+    'lib/e.ts': 'export const e = 1;\n',
+  };
+  for (const [name, text] of Object.entries(files)) {
+    mkdirSync(dirname(join(dir, name)), { recursive: true });
+    writeFileSync(join(dir, name), text);
+  }
+  const args = ['-p', dir, '--runExternalCode'];
+  const path = process.env.PATH;
+  process.env.PATH = `${writeMapperLaunchers(tempDir('tsc-ts-parallel-load-mappers-'), join(out, 'compiler/span-map.js'))}${delimiter}${path}`;
+  try {
+    clearPrepared();
+    const plain = executeCommandLine(createNodeSystem(bundledLibs, ''), args);
+    assert.equal(plain.kind, 'compile');
+    // The mappers are closed, and gone from the host, once the program is loaded.
+    assert.equal(plain.program.host.contentMapperProject, undefined);
+    const expected = describe(plain.program);
+
+    assignSymbolIdsAtCreation();
+    useLazyJSDocTable();
+    const thread = parseThreadOfCommandLine(args, join(dir, 'tsconfig.json'), bundledLibs);
+    const queue = new ParseQueue();
+    for (const name of ['src/a.ts', 'src/b.box', 'src/c.astro', 'src/d.ts']) queue.push(Root, join(dir, name), 0);
+    queue.push(Library, 'lib.es2022.d.ts', 0);
+    queue.push(AutomaticTypes, '', 0);
+    for (let chunk = queue.next(1); chunk !== undefined; chunk = queue.next(1)) {
+      const batch = thread.load(chunk);
+      for (const prepared of batch.files) parallelParse.files.set(prepared.fileName, prepared);
+      for (let k = 0; k < batch.added.names.length; k++)
+        queue.push(batch.added.kinds[k], batch.added.names[k], batch.added.depths[k]);
+    }
+    const prepared = [...parallelParse.files.keys()].filter((name) => name.startsWith(dir)).sort();
+    assert.deepEqual(prepared, [join(dir, 'src/a.ts'), join(dir, 'src/d.ts')]);
+
+    const shared = executeCommandLine(createNodeSystem(bundledLibs, ''), args);
+    assert.equal(shared.kind, 'compile');
+    assert.equal(describe(shared.program), expected);
+    // The mapped files, the supplemental virtual file of one and the file only a mapped file imports.
+    assert.equal(parallelParse.used, shared.program.getSourceFiles().length - 4);
+    assert.match(expected, /c\.astro\.0\.ts/);
+    assert.match(expected, /module \d+\|\.\/b\.box .*src\/b\.box false/);
+    assert.match(expected, /semantic .*c\.astro\.0\.ts:\d+-\d+:2322:/);
+  } finally {
+    process.env.PATH = path;
+  }
 });

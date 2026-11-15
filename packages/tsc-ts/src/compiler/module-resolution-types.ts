@@ -61,6 +61,8 @@ export interface ResolvedModule {
   originalPath: string;
   extension: string;
   resolvedUsingTsExtension: boolean;
+  /** The specifier spells an extension a content mapper registers (`Resolver.extraExtensions`), and names that file. */
+  resolvedUsingExtraExtensions: boolean;
   packageId: PackageId | undefined;
   isExternalLibraryImport: boolean;
   /** A file found with `exports` ignored, when the real resolution only found JavaScript. */
@@ -208,6 +210,8 @@ export function getResolutionDiagnostic(
   resolved: ResolvedModule,
   isDeclarationFile: boolean,
 ): DiagnosticMessage | undefined {
+  // A file a content mapper transforms is TypeScript whatever its extension.
+  if (resolved.resolvedUsingExtraExtensions) return undefined;
   const needJsx = options.jsx === undefined;
   const needAllowJs = !getAllowJS(options) && (options.noImplicitAny ?? options.strict) === true;
   switch (resolved.extension) {

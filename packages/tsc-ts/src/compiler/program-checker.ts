@@ -9,10 +9,13 @@
  */
 import { type Node, ScriptKind, type SourceFile } from './ast.js';
 import { Checker, CheckerHost, disposeChecker } from './checker.js';
+import { MappedDiagnosticDirectivePolicy } from './content-mapper.js';
 import {
   compareDiagnostics,
   createDiagnostic,
+  createExternalDiagnostic,
   Diagnostic,
+  DiagnosticCategory,
   type DiagnosticMessage,
   Diagnostics,
   messageCode,
@@ -35,6 +38,7 @@ import {
 import { bindSourceFile } from './binder.js';
 import { checkSourceFileRange } from './checker-source-file.js';
 import { computeLineOfPosition } from './scanner.js';
+import { SpanMapFidelity } from './span-map.js';
 import { CommentDirectiveKind } from './types.js';
 
 /** What the checker needs, answered by a program. */
@@ -334,7 +338,7 @@ export class CheckedProgram {
       const result: Diagnostic[] = [];
       for (const diagnostics of parallel)
         if (diagnostics !== undefined) for (const d of diagnostics) if (!noEmit || !d.skippedOnNoEmit) result.push(d);
-      return sortAndDeduplicateDiagnostics(result);
+      return filterAndSortDiagnostics(result);
     }
     return this.collectChecked(file, (f) => this.semanticDiagnosticsOfFile(f));
   }
@@ -402,9 +406,9 @@ export class CheckedProgram {
     const diagnostics = parallel === undefined ? undefined : parallel[this.indexOfFile(file)];
     if (diagnostics !== undefined) {
       const count = diagnostics.length - this.getIncludeProcessorDiagnostics(file).length;
-      return sortAndDeduplicateDiagnostics(diagnostics.slice(0, count));
+      return filterAndSortDiagnostics(diagnostics.slice(0, count));
     }
-    return sortAndDeduplicateDiagnostics(this.getBindAndCheckDiagnostics(file));
+    return filterAndSortDiagnostics(this.getBindAndCheckDiagnostics(file));
   }
 
   /** The declaration diagnostics checker threads computed for `file` (`declarationsInParallel`), if any. */
@@ -457,20 +461,20 @@ export class CheckedProgram {
   }
 
   private collect(file: SourceFile | undefined, get: (file: SourceFile) => readonly Diagnostic[]): Diagnostic[] {
-    if (file !== undefined) return sortAndDeduplicateDiagnostics(get(file));
+    if (file !== undefined) return filterAndSortDiagnostics(get(file));
     const result: Diagnostic[] = [];
     for (const f of this.program.getSourceFiles()) for (const d of get(f)) result.push(d);
-    return sortAndDeduplicateDiagnostics(result);
+    return filterAndSortDiagnostics(result);
   }
 
   private collectChecked(file: SourceFile | undefined, get: (file: SourceFile) => readonly Diagnostic[]): Diagnostic[] {
-    if (file !== undefined) return this.skipTypeChecking(file) ? [] : sortAndDeduplicateDiagnostics(get(file));
+    if (file !== undefined) return this.skipTypeChecking(file) ? [] : filterAndSortDiagnostics(get(file));
     const result: Diagnostic[] = [];
     for (const f of this.program.getSourceFiles()) {
       if (this.skipTypeChecking(f)) continue;
       for (const d of get(f)) result.push(d);
     }
-    return sortAndDeduplicateDiagnostics(result);
+    return filterAndSortDiagnostics(result);
   }
 
   /** `checks` are the checker's diagnostics of `file`. */
@@ -506,7 +510,7 @@ export class CheckedProgram {
         ),
       );
     }
-    return filtered;
+    return applyContentMapperDiagnosticDirectives(file, filtered);
   }
 
   getIncludeProcessorDiagnostics(file: SourceFile): Diagnostic[] {
@@ -514,6 +518,66 @@ export class CheckedProgram {
     const diagnostics = this.program.getIncludeProcessorDiagnostics(file);
     return diagnostics.length === 0 ? diagnostics : new Directives(file).filter(diagnostics);
   }
+}
+
+/**
+ * `diagnostics` of `file` as the diagnostic directives its content mapper returned leave them: without the
+ * compiler's diagnostics that start in the virtual range of a directive, and with the error of each `Expect`
+ * directive that left none out, which the mapper worded, at the directive in the original text.
+ */
+function applyContentMapperDiagnosticDirectives(file: SourceFile, diagnostics: Diagnostic[]): Diagnostic[] {
+  const directives = file.diagnosticDirectives();
+  if (directives.length === 0) return diagnostics;
+  const used = new Set<number>();
+  const result: Diagnostic[] = [];
+  for (const diagnostic of diagnostics) {
+    const index =
+      diagnostic.file !== undefined && diagnostic.file.fileName === file.fileName && diagnostic.source === ''
+        ? directives.findIndex(
+            (directive) => diagnostic.pos >= directive.virtualPos && diagnostic.pos < directive.virtualEnd,
+          )
+        : -1;
+    if (index < 0) result.push(diagnostic);
+    else used.add(index);
+  }
+  for (let i = 0; i < directives.length; i++) {
+    const directive = directives[i];
+    if (directive.policy !== MappedDiagnosticDirectivePolicy.Expect || used.has(i)) continue;
+    result.push(
+      createExternalDiagnostic(
+        file.diagnosticFile(),
+        directive.originalPos,
+        directive.originalEnd,
+        directive.source,
+        DiagnosticCategory.Error,
+        directive.unusedCode,
+        directive.unusedMessageText,
+      ),
+    );
+  }
+  return result;
+}
+
+/**
+ * Whether `diagnostic` reports code as unnecessary that a content mapper synthesized as a whole: the
+ * original file has nothing to remove.
+ */
+function reportsUnnecessarySynthesizedCode(diagnostic: Diagnostic): boolean {
+  if (!diagnostic.reportsUnnecessary || diagnostic.source !== '') return false;
+  const spanMap = diagnostic.file?.mapped?.spanMap;
+  return (
+    spanMap !== undefined &&
+    spanMap.virtualToOriginalSpan(diagnostic.pos, diagnostic.end).fidelity === SpanMapFidelity.None
+  );
+}
+
+/** `diagnostics` sorted, each once, without those that report synthesized code as unnecessary. */
+function filterAndSortDiagnostics(diagnostics: readonly Diagnostic[]): Diagnostic[] {
+  return sortAndDeduplicateDiagnostics(
+    diagnostics.some(reportsUnnecessarySynthesizedCode)
+      ? diagnostics.filter((diagnostic) => !reportsUnnecessarySynthesizedCode(diagnostic))
+      : diagnostics,
+  );
 }
 
 /** Whether `sorted`, in `compareDiagnostics` order, has a diagnostic equal to `diagnostic`. */

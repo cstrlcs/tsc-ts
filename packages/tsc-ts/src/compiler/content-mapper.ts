@@ -23,6 +23,7 @@ import {
   type Diagnostic,
   type DiagnosticMessage,
 } from './diagnostics.js';
+import type { SourceFile } from './ast.js';
 import { compilerOptionNames, getCompilerOption, type CompilerOptions } from './options.js';
 import { parseJson, type JsonValue } from './package-json.js';
 import {
@@ -621,6 +622,37 @@ export class ContentMapperResult extends MappedResult {
   }
 }
 
+/**
+ * What a source file keeps of the transform that produced it: the file has the virtual text, parsed as its
+ * virtual extension says, under the name of the original file. A supplemental virtual file has a name of its
+ * own (`getSupplementalFileName`).
+ */
+export class ContentMapperSourceFileInfo {
+  constructor(
+    /** The identity of the mapper. */
+    readonly contentMapper: string,
+    /**
+     * The identity of the mapper as the file's project configures it (`ContentMapperProject.identity`), or
+     * the digest of its transform identity where the project cannot tell.
+     */
+    readonly transformIdentity: string,
+    /** The file's name with its virtual extension, which decides its script kind and module format. */
+    readonly virtualFileName: string,
+    /** The text of the original file. */
+    readonly originalText: string,
+    /**
+     * The map from the file's text back to `originalText`; `undefined` for the empty file that stands in for a
+     * transform that failed.
+     */
+    readonly spanMap: SpanMap | undefined,
+    readonly diagnosticDirectives: readonly MappedDiagnosticDirective[],
+    /** The supplemental virtual files of a canonical file. */
+    readonly supplementalSourceFiles: readonly SourceFile[],
+    /** The canonical file of a supplemental virtual file. */
+    readonly canonicalSourceFile: SourceFile | undefined,
+  ) {}
+}
+
 // ---- Errors
 
 /** The stage at which a transform failed. */
@@ -826,12 +858,19 @@ export function validateResult(
   content: string,
 ): TransformError | MappingError | undefined {
   for (const output of [result, ...result.supplemental]) {
-    if (output.mappings === undefined) return new TransformError(TransformErrorKind.Mappings, undefined);
-    const problem = output.mappings.validate(output.text, content);
+    const problem = validateOutput(output, content);
     if (problem !== undefined) return problem;
-    if (!isSupportedVirtualExtension(output.virtualExtension))
-      return new TransformError(TransformErrorKind.Response, undefined);
   }
+  return undefined;
+}
+
+/** `validateResult` for one output of a result. */
+export function validateOutput(output: MappedResult, content: string): TransformError | MappingError | undefined {
+  if (output.mappings === undefined) return new TransformError(TransformErrorKind.Mappings, undefined);
+  const problem = output.mappings.validate(output.text, content);
+  if (problem !== undefined) return problem;
+  if (!isSupportedVirtualExtension(output.virtualExtension))
+    return new TransformError(TransformErrorKind.Response, undefined);
   return undefined;
 }
 

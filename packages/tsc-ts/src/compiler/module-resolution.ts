@@ -60,6 +60,7 @@ import {
   fileExtensionIs,
   getBaseFileName,
   getDirectoryPath,
+  getLongestExtensionFromPath,
   getNormalizedAbsolutePath,
   getPathComponents,
   getPossibleOriginalInputExtensionForExtension,
@@ -138,10 +139,18 @@ interface Resolved {
   packageId: PackageId | undefined;
   originalPath: string;
   resolvedUsingTsExtension: boolean;
+  resolvedUsingExtraExtensions: boolean;
 }
 
 function resolvedFile(path: string, extension: string, resolvedUsingTsExtension: boolean): Resolved {
-  return { path, extension, packageId: undefined, originalPath: '', resolvedUsingTsExtension };
+  return {
+    path,
+    extension,
+    packageId: undefined,
+    originalPath: '',
+    resolvedUsingTsExtension,
+    resolvedUsingExtraExtensions: false,
+  };
 }
 
 function unresolved(): Resolved {
@@ -273,6 +282,7 @@ function unresolvedModule(diagnostics: readonly Diagnostic[]): ResolvedModule {
     originalPath: '',
     extension: '',
     resolvedUsingTsExtension: false,
+    resolvedUsingExtraExtensions: false,
     packageId: undefined,
     isExternalLibraryImport: false,
     alternateResult: '',
@@ -299,6 +309,11 @@ export class Resolver {
     readonly typingsLocation = '',
     readonly projectName = '',
     packageJsonInfoCache?: PackageJsonInfoCache,
+    /**
+     * The extensions content mappers register. A specifier that spells one names the file with that
+     * extension, as one that spells `.ts` does.
+     */
+    readonly extraExtensions: readonly string[] = [],
   ) {
     this.packageJsonInfoCache =
       packageJsonInfoCache ?? new PackageJsonInfoCache(host.getCurrentDirectory(), host.useCaseSensitiveFileNames());
@@ -1244,6 +1259,7 @@ class ResolutionState {
       packageId: result.packageId,
       originalPath: result.originalPath,
       resolvedUsingTsExtension: result.resolvedUsingTsExtension,
+      resolvedUsingExtraExtensions: false,
     };
   }
 
@@ -1528,6 +1544,7 @@ class ResolutionState {
       originalPath: resolved.originalPath,
       extension: resolved.extension,
       resolvedUsingTsExtension: resolved.resolvedUsingTsExtension,
+      resolvedUsingExtraExtensions: resolved.resolvedUsingExtraExtensions,
       packageId: resolved.packageId,
       isExternalLibraryImport,
       alternateResult: '',
@@ -1739,8 +1756,12 @@ class ResolutionState {
     // Extensionless files are not supported.
     if (!getBaseFileName(candidate).includes('.')) return undefined;
     let extensionless = removeFileExtension(candidate);
-    // Unknown extensions map to declaration files such as `.d.css.ts`.
-    if (extensionless === candidate) extensionless = candidate.slice(0, candidate.lastIndexOf('.'));
+    // Unknown extensions map to declaration files such as `.d.css.ts`. The longest extension a content
+    // mapper registers is one extension, also where it has several dots.
+    if (extensionless === candidate) {
+      const extra = getLongestExtensionFromPath(candidate, this.resolver.extraExtensions, true);
+      extensionless = candidate.slice(0, extra !== '' ? candidate.length - extra.length : candidate.lastIndexOf('.'));
+    }
     const extension = candidate.slice(extensionless.length);
     if (this.traces !== undefined)
       this.trace(Diagnostics.File_name_0_has_a_1_extension_stripping_it, candidate, extension);
@@ -1814,6 +1835,14 @@ class ResolutionState {
         );
       }
       default:
+        if (this.resolver.extraExtensions.includes(originalExtension)) {
+          // A specifier with an extension a content mapper registers names the file itself.
+          const resolved = this.tryExtension(originalExtension, extensionless, false);
+          if (resolved !== undefined) {
+            resolved.resolvedUsingExtraExtensions = true;
+            return resolved;
+          }
+        }
         if (dts && !isDeclarationFileName(extensionless + originalExtension)) {
           return this.tryExtension('.d' + originalExtension + '.ts', extensionless, false);
         }

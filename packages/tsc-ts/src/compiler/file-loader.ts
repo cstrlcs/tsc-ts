@@ -2,19 +2,54 @@
  * Finds every file of a program: root files, libraries, references, imports and type directives, in tsgo's order.
  */
 import {
+  ExternalModuleIndicatorOptions,
   ImportDeclaration,
   NodeFlags,
   ParseOptions,
   ScriptKind,
+  SourceFile,
   StringLiteral,
   Tristate,
   getText,
-  type ExternalModuleIndicatorOptions,
   type FileReference,
   type Node,
-  type SourceFile,
 } from './ast.js';
-import { Diagnostics, type DiagnosticMessage, type MessageWithArgs, messageWithArgs } from './diagnostics.js';
+import {
+  checkSupplementalFileNameCollisions,
+  ContentMapperRequest,
+  ContentMapperSourceFileInfo,
+  DiagnosticDirectiveError,
+  DiagnosticDirectiveErrorKind,
+  getSupplementalFileName,
+  getVirtualFileName,
+  InitializeError,
+  InitializeErrorKind,
+  InvalidVirtualExtensionError,
+  isModuleVirtualExtension,
+  ProjectError,
+  ProjectErrorKind,
+  SupplementalFileCollisionError,
+  TransformError,
+  TransformErrorKind,
+  validateOutput,
+  type ContentMapper,
+  type ContentMapperProject,
+  type ContentMapperResult,
+  type MappedResult,
+  type TransformErrorCause,
+} from './content-mapper.js';
+import {
+  contentMapperMappingDiagnostic,
+  createCompilerDiagnostic,
+  createExternalDiagnostic,
+  Diagnostic,
+  DiagnosticCategory,
+  Diagnostics,
+  type DiagnosticFile,
+  type DiagnosticMessage,
+  type MessageWithArgs,
+  messageWithArgs,
+} from './diagnostics.js';
 import { FileIncludeKind, FileIncludeReason, IncludeProcessor, ProcessingDiagnostic } from './file-include.js';
 import { CachedFileSystem, type DirectoryEntries, FileSystem } from './file-system.js';
 import { ModuleResolutionHost, Resolver, getAutomaticTypeDirectiveNames } from './module-resolution.js';
@@ -45,6 +80,7 @@ import {
 } from './parallel-parse.js';
 import type { PackageJsonLookup } from './package-json.js';
 import { parseSourceFile, getScriptKindFromFileName } from './parser.js';
+import type { MappingError } from './span-map.js';
 import { mark } from './timeline.js';
 import {
   combinePaths,
@@ -86,6 +122,7 @@ import { KnownDirectoryLink, containsIgnoredPath } from './symlinks.js';
 import { isSourcePhaseImport } from './ast-utilities.js';
 import { hasExtension } from './vfs-match.js';
 import { TokenFlags } from './types.js';
+import { toHex } from './xxh3.js';
 import {
   ConfigParser,
   flattenExtensions,
@@ -95,18 +132,59 @@ import {
   type SourceOutputAndProjectReference,
 } from './tsconfig.js';
 
+/** The source files a content mapper's result for one file is parsed into. */
+export class ContentMappedSourceFiles {
+  constructor(
+    /** The file the program has under the name of the original file. */
+    readonly canonical: SourceFile,
+    /** The supplemental virtual files, each under the name the compiler gives it. */
+    readonly supplemental: readonly SourceFile[],
+  ) {}
+}
+
+/** A span map a content mapper returned that is not valid for the text of the output it came with. */
+export class InvalidSpanMap {
+  constructor(
+    readonly problem: MappingError,
+    /** The virtual text of the output with the map and the original text, which the offsets of `problem` are in. */
+    readonly virtualText: string,
+    readonly originalText: string,
+  ) {}
+}
+
+/** Why a content mapper produced no source files for a file. */
+export type ContentMapperFailure = TransformError | InvalidSpanMap | SupplementalFileCollisionError;
+
 /** Files and services the compiler reads through. */
 export class CompilerHost extends ModuleResolutionHost {
   private readonly configParser: ConfigParser;
+  /**
+   * The content mappers of the project as a content mapper host runs them, which transform the files with
+   * the extensions they register; `undefined` for a project without content mappers, and once they are
+   * closed (`closeContentMappers`).
+   */
+  contentMapperProject: ContentMapperProject | undefined;
 
   constructor(
     readonly fs: FileSystem,
     readonly currentDirectory: string,
     /** Where bundled `lib.*.d.ts` files are. */
     readonly defaultLibraryPath: string,
+    contentMapperProject: ContentMapperProject | undefined = undefined,
   ) {
     super();
     this.configParser = new ConfigParser(fs, currentDirectory);
+    this.contentMapperProject = contentMapperProject;
+  }
+
+  /**
+   * Closes the project's content mappers and lets go of them, when no more files are read through this
+   * host. A program is shared with other threads together with its host, and what runs the mappers (their
+   * processes) is nothing threads can share (parallel-check.ts).
+   */
+  closeContentMappers(): void {
+    this.contentMapperProject?.close();
+    this.contentMapperProject = undefined;
   }
 
   useCaseSensitiveFileNames(): boolean {
@@ -160,6 +238,39 @@ export class CompilerHost extends ModuleResolutionHost {
     return parseSourceFile(fileName, text, new ParseOptions(path, scriptKind, externalModuleIndicatorOptions));
   }
 
+  /**
+   * The source files of a file that `mapper` transforms: its text as the mapper of the host's project
+   * rewrites it, parsed under the file's name, and the supplemental virtual files the mapper returned with
+   * it. `undefined` if the file can't be read; the failure if the transform fails, returns a span map that
+   * is not valid, or returns a supplemental file whose name is that of a file on disk.
+   */
+  getContentMappedSourceFiles(
+    fileName: string,
+    path: string,
+    externalModuleIndicatorOptions: ExternalModuleIndicatorOptions,
+    mapper: ContentMapper,
+  ): ContentMappedSourceFiles | ContentMapperFailure | undefined {
+    const project = this.contentMapperProject;
+    if (project === undefined) return new TransformError(TransformErrorKind.Unknown, undefined);
+    const content = this.fs.readFile(fileName);
+    if (content === undefined) return undefined;
+    const transformIdentity = project.identity(mapper);
+    if (typeof transformIdentity !== 'string') return new TransformError(TransformErrorKind.Project, transformIdentity);
+    const result = project.transform(mapper, new ContentMapperRequest(fileName, content));
+    if (result instanceof TransformError) return result;
+    const files = parseResult(
+      fileName,
+      path,
+      externalModuleIndicatorOptions,
+      content,
+      mapper,
+      transformIdentity,
+      result,
+    );
+    if (!(files instanceof ContentMappedSourceFiles)) return files;
+    return checkSupplementalFileNameCollisions(fileName, result, (name) => this.fs.fileExists(name)) ?? files;
+  }
+
   /** The config of a referenced project, or `undefined` if it can't be read. */
   getResolvedProjectReference(fileName: string): ParsedCommandLine | undefined {
     return this.configParser.parseConfigFile(fileName, undefined, undefined, []);
@@ -167,6 +278,98 @@ export class CompilerHost extends ModuleResolutionHost {
 
   /** Called with module resolution traces under `--traceResolution`. */
   trace(_message: MessageWithArgs): void {}
+}
+
+/**
+ * Parses what a content mapper returned for the file `fileName` with the text `content`, once each output is
+ * checked (`validateOutput`): the canonical output under the file's name and each supplemental output under
+ * the name the compiler gives it, as the virtual extension of each says, with the mapper's diagnostics on
+ * the canonical file.
+ */
+export function parseResult(
+  fileName: string,
+  path: string,
+  externalModuleIndicatorOptions: ExternalModuleIndicatorOptions,
+  content: string,
+  mapper: ContentMapper,
+  transformIdentity: string,
+  result: ContentMapperResult,
+): ContentMappedSourceFiles | TransformError | InvalidSpanMap {
+  const parse = (
+    output: MappedResult,
+    name: string,
+    outputPath: string,
+    virtualFileName: string,
+  ): SourceFile | TransformError | InvalidSpanMap => {
+    const problem = validateOutput(output, content);
+    if (problem instanceof TransformError) return problem;
+    if (problem !== undefined) return new InvalidSpanMap(problem, output.text, content);
+    // A `.mts`, `.cts`, `.mjs` or `.cjs` file is a module whatever it contains.
+    const moduleOptions = isModuleVirtualExtension(output.virtualExtension)
+      ? new ExternalModuleIndicatorOptions(externalModuleIndicatorOptions.jsx, true)
+      : externalModuleIndicatorOptions;
+    return parseSourceFile(
+      name,
+      output.text,
+      new ParseOptions(outputPath, getScriptKindFromFileName(virtualFileName), moduleOptions),
+    );
+  };
+  const virtualFileName = getVirtualFileName(fileName, result.virtualExtension);
+  const canonical = parse(result, fileName, path, virtualFileName);
+  if (!(canonical instanceof SourceFile)) return canonical;
+  if (result.diagnostics.length > 0) {
+    const diagnostics = canonical.diagnostics.slice();
+    for (const diagnostic of result.diagnostics)
+      diagnostics.push(
+        createExternalDiagnostic(
+          canonical.diagnosticFile(),
+          diagnostic.pos,
+          diagnostic.end,
+          diagnostic.source,
+          DiagnosticCategory.Error,
+          diagnostic.code,
+          diagnostic.messageText,
+        ),
+      );
+    canonical.diagnostics = diagnostics;
+  }
+  const supplemental: SourceFile[] = [];
+  for (let i = 0; i < result.supplemental.length; i++) {
+    const output = result.supplemental[i];
+    const name = getSupplementalFileName(fileName, i, output.virtualExtension);
+    const file = parse(output, name, path + name.slice(fileName.length), name);
+    if (!(file instanceof SourceFile)) return file;
+    supplemental.push(file);
+  }
+  const identity = mapper.identity();
+  canonical.setContentMapperInfo(
+    new ContentMapperSourceFileInfo(
+      identity,
+      transformIdentity,
+      virtualFileName,
+      content,
+      result.mappings,
+      result.diagnosticDirectives,
+      supplemental,
+      undefined,
+    ),
+  );
+  for (let i = 0; i < supplemental.length; i++) {
+    const output = result.supplemental[i];
+    supplemental[i].setContentMapperInfo(
+      new ContentMapperSourceFileInfo(
+        identity,
+        transformIdentity,
+        supplemental[i].fileName,
+        content,
+        output.mappings,
+        output.diagnosticDirectives,
+        [],
+        canonical,
+      ),
+    );
+  }
+  return new ContentMappedSourceFiles(canonical, supplemental);
 }
 
 /** A bundled library file. */
@@ -277,6 +480,11 @@ class ParseTask {
   loadedTask: ParseTask | undefined = undefined;
   /** The index in `FileLoader.taskData` of the tasks of this task's path, once known; -1 before. */
   dataIndex = -1;
+  /**
+   * For the task of a supplemental virtual file of a content mapper, the file, which was parsed with its
+   * canonical file and is not on disk.
+   */
+  supplementalFile: SourceFile | undefined = undefined;
   /** Whether an import or a type reference directive adds the file (`ProcessedFiles.addedFiles`). */
   readonly byImport: boolean;
 
@@ -330,6 +538,7 @@ const locallyDeclaredModule: ResolvedModule = {
   originalPath: '',
   extension: '',
   resolvedUsingTsExtension: false,
+  resolvedUsingExtraExtensions: false,
   packageId: undefined,
   isExternalLibraryImport: false,
   alternateResult: '',
@@ -669,15 +878,27 @@ export class ProcessedFiles {
      * `files`, without the file itself.
      */
     readonly addedFiles: readonly (readonly number[])[],
+    /**
+     * The diagnostics without a file that loading reported for content mappers: one that could not be
+     * initialized, and one that failed so often that the rest of its files were not transformed.
+     */
+    readonly contentMapperDiagnostics: readonly Diagnostic[],
   ) {}
 }
 
-/** The files of `processed` with `file` in place of the file at its path, for `Program.updateFile`. */
+/**
+ * The files of `processed` with `file` in place of the file at its path, and the supplemental virtual files
+ * of `file` in place of those of that file, which are as many and at the same paths, for `Program.updateFile`.
+ */
 export function withReplacedFile(processed: ProcessedFiles, file: SourceFile): ProcessedFiles {
   const files = processed.files.slice();
-  files[files.findIndex((f) => f.path === file.path)] = file;
   const filesByPath = new Map(processed.filesByPath);
-  filesByPath.set(file.path, file);
+  let includeProcessor = processed.includeProcessor;
+  for (const replacement of [file, ...file.supplementalSourceFiles()]) {
+    files[files.findIndex((f) => f.path === replacement.path)] = replacement;
+    filesByPath.set(replacement.path, replacement);
+    includeProcessor = includeProcessor.copy(replacement.path);
+  }
   return new ProcessedFiles(
     processed.resolver,
     files,
@@ -690,7 +911,7 @@ export function withReplacedFile(processed: ProcessedFiles, file: SourceFile): P
     processed.importHelpersImportSpecifiers,
     processed.libFiles,
     processed.sourceFilesFoundSearchingNodeModules,
-    processed.includeProcessor.copy(file.path),
+    includeProcessor,
     processed.outputFileToProjectReferenceSource,
     processed.redirectTargets,
     processed.redirectFilesByPath,
@@ -698,6 +919,7 @@ export function withReplacedFile(processed: ProcessedFiles, file: SourceFile): P
     processed.preparedPackageJsons,
     // The file has the same references (`canReplaceFile`), and keeps its index.
     processed.addedFiles,
+    processed.contentMapperDiagnostics,
   );
 }
 
@@ -771,6 +993,182 @@ function sameFileReferences(a: readonly FileReference[], b: readonly FileReferen
   return true;
 }
 
+/** The transforms of one content mapper that may fail before the mapper is left out of the program. */
+const maxContentMapperFailures = 5;
+
+/** The diagnostic at the start of `file`, a file the content mapper `label` failed to transform, with the reason chained. */
+function contentMapperTransformDiagnostic(
+  file: DiagnosticFile,
+  label: string,
+  error: TransformError | SupplementalFileCollisionError,
+): Diagnostic {
+  const failed = new Diagnostic(file, 0, 0, Diagnostics.The_content_mapper_0_failed_to_transform_this_file, [label]);
+  const because = (message: DiagnosticMessage, ...args: string[]): Diagnostic =>
+    failed.addMessageChain(createCompilerDiagnostic(message, ...args));
+  if (error instanceof SupplementalFileCollisionError)
+    return because(
+      Diagnostics.Content_mapper_supplemental_output_file_0_conflicts_with_an_existing_file,
+      error.fileName,
+    );
+  const cause = error.cause;
+  switch (error.kind) {
+    case TransformErrorKind.Initialize:
+      if (cause instanceof InitializeError)
+        switch (cause.kind) {
+          case InitializeErrorKind.PositionEncoding:
+            return because(
+              Diagnostics.The_content_mapper_selected_unsupported_position_encoding_0,
+              cause.positionEncoding,
+            );
+          case InitializeErrorKind.EmptyDiagnosticSource:
+            return because(Diagnostics.The_content_mapper_diagnostic_source_must_not_be_empty);
+          case InitializeErrorKind.ReservedDiagnosticSource:
+            return because(
+              Diagnostics.The_content_mapper_diagnostic_source_0_is_reserved_by_TypeScript,
+              cause.diagnosticSource,
+            );
+        }
+      return because(Diagnostics.The_content_mapper_process_could_not_be_started_or_initialized);
+    case TransformErrorKind.Project:
+      return because(contentMapperProjectErrorDiagnostic(cause));
+    case TransformErrorKind.Request:
+      return because(Diagnostics.The_content_mapper_process_failed_while_handling_the_transform_request);
+    case TransformErrorKind.Response: {
+      if (cause instanceof InvalidVirtualExtensionError)
+        return because(
+          Diagnostics.The_content_mapper_returned_an_output_with_unsupported_virtual_extension_0,
+          cause.extension,
+        );
+      const detail = cause instanceof DiagnosticDirectiveError ? diagnosticDirectiveErrorDiagnostic(cause) : undefined;
+      if (detail !== undefined) return failed.addMessageChain(detail);
+      return because(Diagnostics.The_content_mapper_returned_an_invalid_transform_response);
+    }
+    case TransformErrorKind.Mappings:
+      return new Diagnostic(
+        file,
+        0,
+        0,
+        Diagnostics.The_content_mapper_0_did_not_provide_the_required_position_mappings,
+        [label],
+      );
+    default:
+      return failed;
+  }
+}
+
+/** What is wrong with a diagnostic directive a content mapper returned, and in which supplemental output it is. */
+function diagnosticDirectiveErrorDiagnostic(error: DiagnosticDirectiveError): Diagnostic | undefined {
+  const index = String(error.index);
+  let detail: Diagnostic;
+  switch (error.kind) {
+    case DiagnosticDirectiveErrorKind.InvalidRange:
+      detail = createCompilerDiagnostic(
+        Diagnostics.Diagnostic_directive_0_returned_by_the_content_mapper_has_an_invalid_range,
+        index,
+      );
+      break;
+    case DiagnosticDirectiveErrorKind.InvalidPolicy:
+      detail = createCompilerDiagnostic(
+        Diagnostics.The_content_mapper_returned_a_diagnostic_directive_with_invalid_policy_0,
+        String(error.policy),
+      );
+      break;
+    case DiagnosticDirectiveErrorKind.ExpectMissingUnusedDiagnostic:
+      detail = createCompilerDiagnostic(
+        Diagnostics.Diagnostic_directive_0_returned_by_the_content_mapper_must_specify_unusedExpectDirectiveIndex_when_there_is_not_exactly_one_unusedExpectDirectiveDiagnostics_entry,
+        index,
+      );
+      break;
+    case DiagnosticDirectiveErrorKind.InvalidUnusedDiagnosticIndex:
+      detail = createCompilerDiagnostic(
+        Diagnostics.Diagnostic_directive_0_returned_by_the_content_mapper_has_an_invalid_unusedExpectDirectiveIndex,
+        index,
+      );
+      break;
+    case DiagnosticDirectiveErrorKind.Overlap:
+      detail = createCompilerDiagnostic(
+        Diagnostics.The_content_mapper_returned_diagnostic_directives_with_overlapping_virtual_ranges,
+      );
+      break;
+    default:
+      return undefined;
+  }
+  if (error.supplementalIndex < 0) return detail;
+  return createCompilerDiagnostic(
+    Diagnostics.The_invalid_diagnostic_directive_is_in_supplemental_output_0_returned_by_the_content_mapper,
+    String(error.supplementalIndex),
+  ).addMessageChain(detail);
+}
+
+/** The message for a content mapper's project that could not be set up. */
+export function contentMapperProjectErrorDiagnostic(error: TransformErrorCause | undefined): DiagnosticMessage {
+  if (error instanceof ProjectError)
+    switch (error.kind) {
+      case ProjectErrorKind.MalformedResponse:
+        return Diagnostics.The_content_mapper_returned_a_project_response_that_could_not_be_decoded;
+      case ProjectErrorKind.MissingConfigIdentity:
+        return Diagnostics.The_content_mapper_did_not_return_configIdentity_which_is_required_when_the_content_mapper_has_dynamicConfig_Colon_true_in_its_package_json;
+      case ProjectErrorKind.NonAbsoluteWatchedFile:
+        return Diagnostics.The_content_mapper_returned_a_non_absolute_path_in_watchedFiles;
+      case ProjectErrorKind.UnexpectedConfigIdentity:
+        return Diagnostics.The_content_mapper_returned_configIdentity_which_is_only_allowed_when_it_declares_dynamicConfig_Colon_true_in_its_package_json;
+      case ProjectErrorKind.UnexpectedWatchedFiles:
+        return Diagnostics.The_content_mapper_returned_watchedFiles_which_is_only_allowed_when_it_declares_dynamicConfig_Colon_true_in_its_package_json;
+    }
+  return Diagnostics.The_content_mapper_process_failed_while_handling_the_project_request;
+}
+
+/**
+ * The diagnostic without a file for the content mapper `label` that could not be initialized, with the reason
+ * chained. A mapper without a name to show is named as its process was.
+ */
+export function contentMapperInitializationDiagnostic(
+  label: string,
+  error: TransformErrorCause | undefined,
+): Diagnostic {
+  const cause = error instanceof InitializeError ? error : undefined;
+  if (cause !== undefined && label === '') label = cause.mapperName;
+  const diagnostic = createCompilerDiagnostic(Diagnostics.The_content_mapper_0_could_not_be_initialized, label);
+  const because = (message: DiagnosticMessage, ...args: string[]): Diagnostic =>
+    diagnostic.addMessageChain(createCompilerDiagnostic(message, ...args));
+  if (cause !== undefined)
+    switch (cause.kind) {
+      case InitializeErrorKind.ProcessStart:
+        return because(
+          Diagnostics.The_content_mapper_command_0_could_not_be_started_Colon_1,
+          cause.command,
+          cause.detail,
+        );
+      case InitializeErrorKind.ProcessExit:
+        return because(
+          Diagnostics.The_content_mapper_process_exited_before_responding_to_the_initialize_request_exit_code_0,
+          String(cause.exitCode),
+        );
+      case InitializeErrorKind.NoResponse:
+        return because(
+          Diagnostics.The_content_mapper_did_not_respond_to_the_initialize_request_within_0_seconds,
+          String(cause.timeoutSeconds),
+        );
+      case InitializeErrorKind.InvalidResponse:
+        return because(
+          Diagnostics.The_content_mapper_returned_an_initialize_response_that_could_not_be_decoded_Colon_0,
+          cause.detail,
+        );
+      case InitializeErrorKind.Request:
+        return because(Diagnostics.The_content_mapper_s_initialize_request_failed_Colon_0, cause.detail);
+      case InitializeErrorKind.PositionEncoding:
+        return because(Diagnostics.The_content_mapper_selected_unsupported_position_encoding_0, cause.positionEncoding);
+      case InitializeErrorKind.EmptyDiagnosticSource:
+        return because(Diagnostics.The_content_mapper_diagnostic_source_must_not_be_empty);
+      case InitializeErrorKind.ReservedDiagnosticSource:
+        return because(
+          Diagnostics.The_content_mapper_diagnostic_source_0_is_reserved_by_TypeScript,
+          cause.diagnosticSource,
+        );
+    }
+  return because(Diagnostics.The_content_mapper_process_could_not_be_started_or_initialized);
+}
+
 class LibResolution {
   constructor(
     readonly libraryName: string,
@@ -787,6 +1185,13 @@ export class FileLoader {
   private readonly defaultLibraryPath: string;
   private readonly supportedExtensions: readonly (readonly string[])[];
   private readonly supportedExtensionsWithJson: readonly (readonly string[])[];
+  /** The extensions of the files content mappers transform. */
+  private readonly contentMapperExtensions: readonly string[];
+  /** The transforms of each content mapper that failed, up to `maxContentMapperFailures`. */
+  private readonly contentMapperFailures = new Map<ContentMapper, number>();
+  /** The content mappers that could not be initialized. */
+  private readonly contentMapperInitFailed = new Set<ContentMapper>();
+  private readonly contentMapperDiagnostics: Diagnostic[] = [];
   private readonly maxNodeModuleJsDepth: number;
   private readonly rootTasks: ParseTask[] = [];
   /** The tasks of each path, created when a task of the path is first queued or built ahead. */
@@ -832,8 +1237,12 @@ export class FileLoader {
     const options = config.options;
     this.options = options;
     this.defaultLibraryPath = getNormalizedAbsolutePath(host.defaultLibraryPath, host.currentDirectory);
-    this.supportedExtensions = getSupportedExtensions(options);
-    this.supportedExtensionsWithJson = getSupportedExtensionsWithJsonIfResolveJsonModule(options);
+    this.contentMapperExtensions = config.contentMapperExtensions();
+    this.supportedExtensions = getSupportedExtensions(options, this.contentMapperExtensions);
+    this.supportedExtensionsWithJson = getSupportedExtensionsWithJsonIfResolveJsonModule(
+      options,
+      this.supportedExtensions,
+    );
     this.maxNodeModuleJsDepth = options.maxNodeModuleJsDepth ?? 0;
     this.mapper = new ProjectReferenceMapper(
       config,
@@ -841,7 +1250,7 @@ export class FileLoader {
     );
     this.loadProjectReferences();
     const resolutionHost = this.mapper.resolutionHost(host);
-    this.resolver = new Resolver(resolutionHost, options);
+    this.resolver = new Resolver(resolutionHost, options, '', '', undefined, this.contentMapperExtensions);
     // A parse thread resolves the imports of a file without the declaration outputs this host adds.
     if (resolutionHost !== host) this.takesPreparedResolutions = false;
   }
@@ -1026,6 +1435,9 @@ export class FileLoader {
       }
       task = new ParseTask(fileName, undefined, undefined, false, false, false, undefined);
     }
+    // The program's loader transforms a file with a content mapper's extension: its host has the mappers.
+    if (kind !== LoadKind.AutomaticTypes && this.contentMapperOf(task.normalizedFilePath) !== undefined)
+      return undefined;
     task.path = this.toPath(task.normalizedFilePath);
     this.loadTask(task);
     const redirected = task.redirectedParseTask;
@@ -1410,7 +1822,12 @@ export class FileLoader {
     }
 
     const fs = this.host.fs;
-    if (hasExtension(task.normalizedFilePath) && this.options.allowNonTsExtensions !== true) {
+    const supplemental = task.supplementalFile;
+    if (
+      supplemental === undefined &&
+      hasExtension(task.normalizedFilePath) &&
+      this.options.allowNonTsExtensions !== true
+    ) {
       const canonicalFileName = getCanonicalFileName(task.normalizedFilePath, fs.useCaseSensitiveFileNames);
       if (!this.isSupportedExtension(canonicalFileName)) {
         task.addProcessingDiagnostic(
@@ -1443,13 +1860,17 @@ export class FileLoader {
     const options = this.mapper.getCompilerOptionsForFile(task.path, task.normalizedFilePath);
     // For the host that walks the grammar of the file as it parses it (parse-thread.ts).
     this.host.loadingSourceFileMetadata = task.metadata;
-    const file = this.host.getSourceFile(
-      task.normalizedFilePath,
-      task.path,
-      getExternalModuleIndicatorOptions(task.normalizedFilePath, options, task.metadata),
-    );
+    const file = supplemental ?? this.parseSourceFile(task, options);
     if (file === undefined) return;
     task.file = file;
+    // The virtual extension of a content mapped file decides its module format.
+    const virtualFileName = file.virtualFileName();
+    if (virtualFileName !== '')
+      task.metadata = new SourceFileMetadata(
+        task.metadata.packageJsonType,
+        task.metadata.packageJsonDirectory,
+        getImpliedNodeFormatForFile(virtualFileName, task.metadata.packageJsonType),
+      );
     if (loaded !== undefined && loaded.file === file) {
       this.takeLoadedFile(task, loaded);
       return;
@@ -1472,6 +1893,151 @@ export class FileLoader {
       }
     }
     this.resolveImportsAndModuleAugmentations(task, file);
+    for (const supplementalFile of file.supplementalSourceFiles()) {
+      const subTask = new ParseTask(
+        supplementalFile.fileName,
+        undefined,
+        FileIncludeReason.contentMapperSupplemental(task.path),
+        false,
+        false,
+        false,
+        undefined,
+      );
+      subTask.supplementalFile = supplementalFile;
+      (task.subTasks ??= []).push(subTask);
+    }
+  }
+
+  /** Parses the file of `task`, through its content mapper if a mapper registers its extension. */
+  private parseSourceFile(task: ParseTask, options: CompilerOptions): SourceFile | undefined {
+    const externalModuleIndicatorOptions = getExternalModuleIndicatorOptions(
+      task.normalizedFilePath,
+      options,
+      task.metadata,
+    );
+    const mapper = this.contentMapperOf(task.normalizedFilePath);
+    return mapper !== undefined
+      ? this.parseContentMappedFile(task, externalModuleIndicatorOptions, mapper)
+      : this.host.getSourceFile(task.normalizedFilePath, task.path, externalModuleIndicatorOptions);
+  }
+
+  /** The content mapper that transforms `fileName`, if its extension is one that a mapper registers. */
+  private contentMapperOf(fileName: string): ContentMapper | undefined {
+    return fileExtensionIsOneOf(fileName, this.contentMapperExtensions)
+      ? this.config.getContentMapperForFileName(fileName)
+      : undefined;
+  }
+
+  /**
+   * The file of `task` as `mapper` transforms it, under the name of the original file, or `undefined` if the
+   * file can't be read.
+   *
+   * A mapper that cannot be initialized is reported once, without a file, and is not tried again. Any other
+   * failure is reported in the file and counted: at `maxContentMapperFailures` the mapper is reported as
+   * disabled, once, without a file. A file whose transform failed or was not tried is in the program empty.
+   */
+  private parseContentMappedFile(
+    task: ParseTask,
+    externalModuleIndicatorOptions: ExternalModuleIndicatorOptions,
+    mapper: ContentMapper,
+  ): SourceFile | undefined {
+    const label = mapper.diagnosticName();
+    const transformIdentity = this.getContentMapperTransformIdentity(mapper);
+    const stub = (): SourceFile =>
+      this.emptyContentMappedFile(task, externalModuleIndicatorOptions, mapper.identity(), transformIdentity);
+    if (this.contentMapperUnavailable(mapper)) return stub();
+    const files = this.host.getContentMappedSourceFiles(
+      task.normalizedFilePath,
+      task.path,
+      externalModuleIndicatorOptions,
+      mapper,
+    );
+    if (files === undefined) return undefined;
+    if (files instanceof ContentMappedSourceFiles) return files.canonical;
+    const file = stub();
+    if (files instanceof TransformError && files.kind === TransformErrorKind.Initialize) {
+      this.recordContentMapperInitializationFailure(mapper, label, files);
+      return file;
+    }
+    if (this.recordContentMapperFailure(mapper, label)) {
+      const diagnosticFile = file.diagnosticFile();
+      file.diagnostics = [
+        ...file.diagnostics,
+        files instanceof InvalidSpanMap
+          ? contentMapperMappingDiagnostic(diagnosticFile, label, files.problem, files.virtualText, files.originalText)
+          : contentMapperTransformDiagnostic(diagnosticFile, label, files),
+      ];
+    }
+    return file;
+  }
+
+  /** The identity of `mapper` in the host's project, or the one its options give without a project. */
+  private getContentMapperTransformIdentity(mapper: ContentMapper): string {
+    const identity = this.host.contentMapperProject?.identity(mapper);
+    return typeof identity === 'string' ? identity : toHex(mapper.transformIdentity(this.options));
+  }
+
+  /**
+   * An empty TypeScript file for a content mapped file whose transform could not be used, which keeps the
+   * original text. A file that imports it gets a module without exports, not one that cannot be found.
+   */
+  private emptyContentMappedFile(
+    task: ParseTask,
+    externalModuleIndicatorOptions: ExternalModuleIndicatorOptions,
+    mapperIdentity: string,
+    transformIdentity: string,
+  ): SourceFile {
+    const file = parseSourceFile(
+      task.normalizedFilePath,
+      '',
+      new ParseOptions(task.path, ScriptKind.TS, externalModuleIndicatorOptions),
+    );
+    file.setContentMapperInfo(
+      new ContentMapperSourceFileInfo(
+        mapperIdentity,
+        transformIdentity,
+        getVirtualFileName(task.normalizedFilePath, '.ts'),
+        this.host.fs.readFile(task.normalizedFilePath) ?? '',
+        undefined,
+        [],
+        [],
+        undefined,
+      ),
+    );
+    return file;
+  }
+
+  /** Whether `mapper` could not be initialized or failed as often as it may. */
+  private contentMapperUnavailable(mapper: ContentMapper): boolean {
+    return (
+      this.contentMapperInitFailed.has(mapper) ||
+      (this.contentMapperFailures.get(mapper) ?? 0) >= maxContentMapperFailures
+    );
+  }
+
+  private recordContentMapperInitializationFailure(mapper: ContentMapper, label: string, error: TransformError): void {
+    if (this.contentMapperInitFailed.has(mapper)) return;
+    this.contentMapperInitFailed.add(mapper);
+    this.contentMapperDiagnostics.push(contentMapperInitializationDiagnostic(label, error.cause));
+  }
+
+  /**
+   * Counts a failed transform of `mapper`. Returns whether the failure is reported in its file: not once
+   * the mapper is disabled. The failure that disables the mapper reports that too, without a file.
+   */
+  private recordContentMapperFailure(mapper: ContentMapper, label: string): boolean {
+    const failures = this.contentMapperFailures.get(mapper) ?? 0;
+    if (failures >= maxContentMapperFailures) return false;
+    this.contentMapperFailures.set(mapper, failures + 1);
+    if (failures + 1 >= maxContentMapperFailures)
+      this.contentMapperDiagnostics.push(
+        createCompilerDiagnostic(
+          Diagnostics.The_content_mapper_0_failed_1_times_and_will_not_be_used,
+          label,
+          String(maxContentMapperFailures),
+        ),
+      );
+    return true;
   }
 
   /** Loads `task` from what a parse thread found loading the same file (`LoadedFile`). */
@@ -1673,6 +2239,7 @@ export class FileLoader {
       if (resolvedFileName === '') continue;
       // Redirected files are not JavaScript files.
       const isJsFile =
+        !resolved.resolvedUsingExtraExtensions &&
         !fileExtensionIsOneOf(resolvedFileName, supportedTSExtensionsWithJsonFlat) &&
         this.mapper.getRedirectForResolution(this.toPath(resolvedFileName), resolvedFileName) === undefined;
       const isJsFileFromNodeModules =
@@ -1906,6 +2473,7 @@ export class FileLoader {
       this.mapper,
       this.tookPreparedResolutions ? preparedPackageJsonLookups() : noPackageJsonLookups,
       addedFiles,
+      this.contentMapperDiagnostics,
     );
   }
 }

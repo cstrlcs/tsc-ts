@@ -380,6 +380,10 @@ class NodeSystem extends System {
     }
   }
 
+  writeError(text: string): void {
+    process.stderr.write(text);
+  }
+
   private toOsPath(path: string): string {
     if (this.bundledLibs !== '' && path.startsWith(bundledPrefix)) {
       return this.bundledLibs + '/' + path.slice(bundledPrefix.length);

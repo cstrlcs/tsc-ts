@@ -210,12 +210,12 @@ export class MappedFileInfo {
 export class DiagnosticFile {
   readonly fileName: string;
   readonly text: string;
-  /** How a content mapper produced `text`; undefined for any other file. */
-  readonly mapped: MappedFileInfo | undefined;
+  /** How a content mapper produced `text` (`setMapped`); undefined for any other file. */
+  mapped: MappedFileInfo | undefined = undefined;
   /** For a mapped file, its original text under the name diagnostics show. */
-  private readonly originalFile: DiagnosticFile | undefined;
+  private originalFile: DiagnosticFile | undefined = undefined;
   /** For a supplemental file, its text under the name of its canonical file. */
-  private readonly canonicalFile: DiagnosticFile | undefined;
+  private canonicalFile: DiagnosticFile | undefined = undefined;
   // Computed on first use; never empty once computed.
   private lineStarts: readonly number[] = noNumbers;
   /** Whether this is a thread's copy of a possibly shared file (`threadCopyOf`). */
@@ -224,17 +224,23 @@ export class DiagnosticFile {
   constructor(fileName: string, text: string, mapped: MappedFileInfo | undefined = undefined) {
     this.fileName = fileName;
     this.text = text;
+    if (mapped !== undefined) this.setMapped(mapped);
+  }
+
+  /**
+   * Says that a content mapper produced `text`. The parser creates the file of a source file with its
+   * parse errors, before the loader knows what else the mapper returned, so the source file says it then
+   * (`SourceFile.setContentMapperInfo`), before anything reads where a diagnostic of the file is shown.
+   */
+  setMapped(mapped: MappedFileInfo): void {
     this.mapped = mapped;
-    const supplemental = mapped !== undefined && mapped.canonicalFileName !== '';
+    const supplemental = mapped.canonicalFileName !== '';
     // As tsgo's OriginalText, which is the text itself for a mapper without an identity.
-    this.originalFile =
-      mapped !== undefined
-        ? new DiagnosticFile(
-            supplemental ? mapped.canonicalFileName : fileName,
-            mapped.contentMapper !== '' ? mapped.originalText : text,
-          )
-        : undefined;
-    this.canonicalFile = supplemental ? new DiagnosticFile(mapped.canonicalFileName, text) : undefined;
+    this.originalFile = new DiagnosticFile(
+      supplemental ? mapped.canonicalFileName : this.fileName,
+      mapped.contentMapper !== '' ? mapped.originalText : this.text,
+    );
+    this.canonicalFile = supplemental ? new DiagnosticFile(mapped.canonicalFileName, this.text) : undefined;
   }
 
   /**

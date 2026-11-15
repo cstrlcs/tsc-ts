@@ -1515,7 +1515,7 @@ export function buildWithThreads(
 
 /** A copy of `config` with its own lazily computed parts and errors. */
 function copyCommandLine(config: ParsedCommandLine): ParsedCommandLine {
-  return new ParsedCommandLine(
+  const copy = new ParsedCommandLine(
     config.options,
     config.typeAcquisition,
     config.fileNames,
@@ -1526,6 +1526,8 @@ function copyCommandLine(config: ParsedCommandLine): ParsedCommandLine {
     config.useCaseSensitiveFileNames,
     config.literalFileNamesLength,
   );
+  copy.contentMappers = config.contentMappers;
+  return copy;
 }
 
 /** The totals of a build, gathered project by project. */

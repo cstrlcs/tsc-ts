@@ -290,6 +290,7 @@ interface Output {
   originalPath: string;
   extension: string;
   resolvedUsingTsExtension: boolean;
+  resolvedUsingExtraExtensions: boolean;
   isExternalLibraryImport: boolean;
   packageId: PackageId | undefined;
   alternateResult: string;
@@ -309,6 +310,8 @@ function outputJson(o: Output): string {
     quote(o.extension) +
     ',"resolvedUsingTsExtension":' +
     String(o.resolvedUsingTsExtension) +
+    ',"resolvedUsingExtraExtensions":' +
+    String(o.resolvedUsingExtraExtensions) +
     ',"isExternalLibraryImport":' +
     String(o.isExternalLibraryImport) +
     ',"packageId":' +
@@ -332,6 +335,7 @@ function emptyOutput(): Output {
     originalPath: '',
     extension: '',
     resolvedUsingTsExtension: false,
+    resolvedUsingExtraExtensions: false,
     isExternalLibraryImport: false,
     packageId: undefined,
     alternateResult: '',
@@ -350,7 +354,14 @@ function runCase(c: JsonObject): string[] {
     bool(c, 'useCaseSensitiveFileNames') === true,
     str(c, 'currentDirectory'),
   );
-  const resolver = new Resolver(host, options, str(c, 'typingsLocation'), str(c, 'projectName'));
+  const resolver = new Resolver(
+    host,
+    options,
+    str(c, 'typingsLocation'),
+    str(c, 'projectName'),
+    undefined,
+    strings(c, 'extraExtensions'),
+  );
   let redirect: ResolvedProjectReference | undefined;
   const redirectValue = c.entries.get('redirect');
   if (redirectValue !== undefined && redirectValue.type === 'object') {
@@ -379,6 +390,7 @@ function runCase(c: JsonObject): string[] {
         out.originalPath = r.originalPath;
         out.extension = r.extension;
         out.resolvedUsingTsExtension = r.resolvedUsingTsExtension;
+        out.resolvedUsingExtraExtensions = r.resolvedUsingExtraExtensions;
         out.isExternalLibraryImport = r.isExternalLibraryImport;
         out.packageId = r.packageId;
         out.alternateResult = r.alternateResult;

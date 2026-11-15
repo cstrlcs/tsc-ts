@@ -6,8 +6,10 @@ import type { ProgramLifetime } from '@scriptc/types';
 import { IdentifierName } from './identifier-name.js';
 import { SyntaxKind } from './syntax-kind.js';
 import { type CommentDirective, type CommentRange, type LanguageVariant, TokenFlags } from './types.js';
-import { type Diagnostic, DiagnosticFile } from './diagnostics.js';
+import type { ContentMapperSourceFileInfo, MappedDiagnosticDirective } from './content-mapper.js';
+import { type Diagnostic, DiagnosticFile, MappedFileInfo } from './diagnostics.js';
 import type { ResolutionMode } from './module-resolution-types.js';
+import type { SpanMap } from './span-map.js';
 import type { FlowNode } from './flow.js';
 import type { Symbol, SymbolTable } from './symbol.js';
 
@@ -8250,6 +8252,8 @@ export const emptyPragmas: readonly Pragma[] = [];
 export const emptyFileReferences: readonly FileReference[] = [];
 export const emptyPatternAmbientModules: readonly PatternAmbientModule[] = [];
 const emptyNumbers: readonly number[] = [];
+const emptyDiagnosticDirectives: readonly MappedDiagnosticDirective[] = [];
+const emptySourceFiles: readonly SourceFile[] = [];
 
 /** `list` with `item` appended: a new array when `list` is empty (it may be shared), else `list` itself. */
 export function appendToList<T>(list: readonly T[], item: T): readonly T[] {
@@ -8312,6 +8316,8 @@ export class SourceFile extends Node {
    * TS files): few nodes carry JSDoc, so it lives here instead of in a field of every node.
    */
   jsDocs: Map<number, Node[]> | undefined;
+  /** For a file a content mapper produced, what it keeps of the transform (`setContentMapperInfo`). */
+  contentMapperInfo: ContentMapperSourceFileInfo | undefined;
   private diagnosticFileCache: DiagnosticFile | undefined;
 
   // Set by the binder.
@@ -8378,6 +8384,7 @@ export class SourceFile extends Node {
     this.reparsedClones = emptyNodes;
     this.hasLazyJSDoc = false;
     this.jsDocs = undefined;
+    this.contentMapperInfo = undefined;
     this.diagnosticFileCache = undefined;
     this.symbol = undefined;
     this.locals = undefined;
@@ -8430,6 +8437,81 @@ export class SourceFile extends Node {
 
   isJS(): boolean {
     return this.scriptKind === ScriptKind.JS || this.scriptKind === ScriptKind.JSX;
+  }
+
+  /**
+   * Says that a content mapper produced the file, once, before the file is in a program. Diagnostics of the
+   * file are from then on shown where they map to in the original text.
+   */
+  setContentMapperInfo(info: ContentMapperSourceFileInfo): void {
+    if (this.contentMapperInfo !== undefined) throw new Error('content mapper source file info already set');
+    this.contentMapperInfo = info;
+    const canonical = info.canonicalSourceFile;
+    this.diagnosticFile().setMapped(
+      new MappedFileInfo(
+        info.contentMapper,
+        info.originalText,
+        info.spanMap,
+        canonical === undefined ? '' : canonical.fileName,
+      ),
+    );
+  }
+
+  /** The text a content mapper transformed into this file's, or the file's own text. */
+  originalText(): string {
+    const info = this.contentMapperInfo;
+    return info !== undefined && info.contentMapper !== '' ? info.originalText : this.text;
+  }
+
+  /** The name of the canonical file of a supplemental virtual file, or the file's own name. */
+  originalFileName(): string {
+    const canonical = this.canonicalSourceFile();
+    return canonical === undefined ? this.fileName : canonical.fileName;
+  }
+
+  /**
+   * The map from the file's text back to its original text; `undefined` for a file no content mapper
+   * produced and for the empty file that stands in for a transform that failed.
+   */
+  spanMap(): SpanMap | undefined {
+    return this.contentMapperInfo === undefined ? undefined : this.contentMapperInfo.spanMap;
+  }
+
+  /** The identity of the content mapper that produced the file, or `''`. */
+  contentMapper(): string {
+    return this.contentMapperInfo === undefined ? '' : this.contentMapperInfo.contentMapper;
+  }
+
+  /** Whether this is the empty file that stands in for a transform that failed. */
+  isContentMapperFailureStub(): boolean {
+    return this.contentMapper() !== '' && this.spanMap() === undefined;
+  }
+
+  /** The identity of the transform that produced the file, or `''`. */
+  contentMapperTransformIdentity(): string {
+    return this.contentMapperInfo === undefined ? '' : this.contentMapperInfo.transformIdentity;
+  }
+
+  /** The file's name with its virtual extension, or `''` for a file no content mapper produced. */
+  virtualFileName(): string {
+    return this.contentMapperInfo === undefined ? '' : this.contentMapperInfo.virtualFileName;
+  }
+
+  /** The directives of the original file that govern diagnostics in ranges of this file's text. */
+  diagnosticDirectives(): readonly MappedDiagnosticDirective[] {
+    return this.contentMapperInfo === undefined
+      ? emptyDiagnosticDirectives
+      : this.contentMapperInfo.diagnosticDirectives;
+  }
+
+  /** The supplemental virtual files a content mapper produced with this canonical file. */
+  supplementalSourceFiles(): readonly SourceFile[] {
+    return this.contentMapperInfo === undefined ? emptySourceFiles : this.contentMapperInfo.supplementalSourceFiles;
+  }
+
+  /** The canonical file of a supplemental virtual file. */
+  canonicalSourceFile(): SourceFile | undefined {
+    return this.contentMapperInfo === undefined ? undefined : this.contentMapperInfo.canonicalSourceFile;
   }
 }
 

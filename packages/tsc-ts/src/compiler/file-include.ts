@@ -28,6 +28,7 @@ export const enum FileIncludeKind {
   RootFile,
   LibFile,
   AutomaticTypeDirectiveFile,
+  ContentMapperSupplemental,
 }
 
 /**
@@ -38,7 +39,7 @@ export const enum FileIncludeKind {
 export class FileIncludeReason {
   private constructor(
     readonly kind: FileIncludeKind,
-    /** The referencing file's path, for references from a file. */
+    /** The referencing file's path, for references from a file; the canonical file's, for a supplemental virtual file. */
     readonly file: string,
     /** The root file, `lib` entry or reference index; -1 for the default library. */
     readonly index: number,
@@ -66,6 +67,18 @@ export class FileIncludeReason {
       undefined,
       typeReference,
       packageId,
+    );
+  }
+
+  /** A supplemental virtual file a content mapper produced with the canonical file at `canonicalFile`. */
+  static contentMapperSupplemental(canonicalFile: string): FileIncludeReason {
+    return new FileIncludeReason(
+      FileIncludeKind.ContentMapperSupplemental,
+      canonicalFile,
+      -1,
+      undefined,
+      '',
+      undefined,
     );
   }
 
@@ -213,6 +226,14 @@ export class FileIncludeReason {
             )
           : createCompilerDiagnostic(Diagnostics.Entry_point_for_implicit_type_library_0, this.typeReference);
       }
+      case FileIncludeKind.ContentMapperSupplemental: {
+        const canonical = program.getSourceFileByPath(this.file);
+        if (canonical === undefined) throw new Error('canonical file is not in the program');
+        return createCompilerDiagnostic(
+          Diagnostics.Supplemental_virtual_file_produced_by_the_content_mapper_for_file_0,
+          program.displayFileName(canonical.fileName, relative),
+        );
+      }
       default: {
         const lib = program.options.lib;
         if (this.index >= 0 && lib !== undefined) {
@@ -342,6 +363,8 @@ export class FileIncludeReason {
           ? undefined
           : diagnosticAtNode(configFile, node, Diagnostics.File_is_entry_point_of_type_library_specified_here);
       }
+      case FileIncludeKind.ContentMapperSupplemental:
+        return undefined;
       default: {
         const lib = program.options.lib;
         const compilerOptions = program.includeProcessor.compilerOptionsSyntax(program);

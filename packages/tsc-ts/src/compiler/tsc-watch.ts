@@ -256,7 +256,7 @@ function includeDirectories(config: ParsedCommandLine): { path: string; recursiv
 
 /** A copy of `config` with its own lazily computed parts and errors, for a program shared with checker threads. */
 function copyCommandLine(config: ParsedCommandLine): ParsedCommandLine {
-  return new ParsedCommandLine(
+  const copy = new ParsedCommandLine(
     config.options,
     config.typeAcquisition,
     config.fileNames,
@@ -267,6 +267,8 @@ function copyCommandLine(config: ParsedCommandLine): ParsedCommandLine {
     config.useCaseSensitiveFileNames,
     config.literalFileNamesLength,
   );
+  copy.contentMappers = config.contentMappers;
+  return copy;
 }
 
 /** The key of a source file in `WatchSourceFiles`: a file parses the same for the same name, path and options. */

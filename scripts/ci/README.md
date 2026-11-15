@@ -22,7 +22,7 @@ the native tsc-ts on Windows, with the named pipe server `--api --pipe` serves o
 with zig), and runs `api-pipe.test.mjs` with it, over the pipe and over standard input and output, and `native/pipe-win32.test.c`, which checks that the pipe's DACL grants access to the current user only. Locally:
 
 ```sh
-(cd packages/tsc-ts && npm run build:native && npx scriptc build src/drivers/cli.ts --optimization=speed -o dist/cli)
+(cd packages/tsc-ts && npm run build:native && npx scriptc build src/drivers/cli.ts --optimization=speed --ffi native/spawn-posix.ffi.json -o dist/cli)
 node scripts/ci/run-tests.mjs --set native
 ```
 

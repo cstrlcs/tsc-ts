@@ -14,8 +14,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { writeMapperLaunchers } from './content-mapper-server.mjs';
 import { compileSources, tempDir } from './temp.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -338,6 +339,76 @@ test('checkers starting from merged globals report the merge diagnostics and nev
   const codes = plain.diagnostics.map((d) => d.match(/ TS(\d+):/)[1]);
   // Redeclared `dup`, `undefined` and `globalThis`, and the augmentation of a missing module.
   for (const code of ['2451', '2397', '2664']) assert.ok(codes.includes(code), `no TS${code}`);
+});
+
+// A file a content mapper produced keeps its original text and its span map, by which its diagnostics are
+// shown, and may come with supplemental virtual files; the mappers that ran are closed and gone from the
+// program's host once it is loaded. The mappers are those of TypeScript's test cases, as processes.
+test('content mapped files and their diagnostics never write to a bound, prepared program', () => {
+  const dir = tempDir('tsc-ts-immutability-mapped-');
+  const mapper = (name, exec) =>
+    JSON.stringify({ name, version: '1.0.0', typescript: { contentMapper: { exec: [exec] } } });
+  const files = {
+    'tsconfig.json': JSON.stringify({
+      compilerOptions: { strict: true, noUnusedLocals: true, module: 'esnext', moduleResolution: 'bundler', types: [] },
+      contentMappers: [
+        { package: 'box', extensions: ['.box'] },
+        { package: 'lisp', extensions: ['.lisp'] },
+        { package: 'supplemental', extensions: ['.astro'] },
+      ],
+    }),
+    'node_modules/box/package.json': mapper('box', 'compiler-test-mapper'),
+    'node_modules/lisp/package.json': mapper('lisp', 'lisp-mapper'),
+    'node_modules/supplemental/package.json': mapper('supplemental', 'supplemental-diagnostics-mapper'),
+    'widget.box': [
+      'export const label: string = 1;',
+      'export const strict = #{strict};',
+      '// @box-ignore',
+      'export const ignored: string = 2;',
+      '// @box-expect-error: Unused directive.',
+      'export const fine = 3;',
+      'export const open = #{strict',
+      '',
+    ].join('\n'),
+    'expression.lisp': '(+ 1 2 "oops")\n',
+    'component.astro': 'const value: number = "a";\n',
+    'main.ts': [
+      'import { label, strict } from "./widget.box";',
+      'import "./expression.lisp";',
+      'import "./component.astro";',
+      'export const upper: number = label;',
+      'export const flag: string = strict;',
+      '',
+    ].join('\n'),
+  };
+  for (const [name, text] of Object.entries(files)) {
+    mkdirSync(dirname(join(dir, name)), { recursive: true });
+    writeFileSync(join(dir, name), text);
+  }
+  const path = process.env.PATH;
+  process.env.PATH = `${writeMapperLaunchers(tempDir('tsc-ts-immutability-mappers-'), join(out, 'compiler/span-map.js'))}${delimiter}${path}`;
+  let plain;
+  try {
+    plain = assertImmutable(['-p', dir, '--runExternalCode', ...emitOptions(join(dir, 'out'))], 800);
+  } finally {
+    process.env.PATH = path;
+  }
+  const reported = plain.diagnostics.join('\n');
+  // The mapper's own diagnostic, the compiler's in mapped and in synthesized text, one of an alias, the unused
+  // directive, and none where a directive ignores it.
+  assert.match(reported, /widget\.box\(\d+,\d+\) \d+:\d+ TS1000: Unclosed interpolation\./);
+  assert.match(reported, /widget\.box\(\d+,\d+\) \d+:\d+ TS2322: Type 'number' is not assignable to type 'string'\./);
+  assert.match(reported, /widget\.box\(\d+,\d+\) \d+:\d+ TS2578: Unused directive\./);
+  assert.equal(reported.match(/widget\.box\(\d+,\d+\) \d+:\d+ TS2322/g).length, 1);
+  assert.match(reported, /expression\.lisp\(\d+,\d+\) \d+:\d+ TS2304: Cannot find name '\+'\./);
+  assert.match(
+    reported,
+    /component\.astro\.0\.ts\(\d+,\d+\) \d+:\d+ TS2304: Cannot find name 'missingSupplementalGlobal'\./,
+  );
+  assert.match(
+    plain.explained,
+    /Supplemental virtual file produced by the content mapper for file '[^']*component\.astro'/,
+  );
 });
 
 /** Every `step`th single-file test case of `suite`, written as one project. */

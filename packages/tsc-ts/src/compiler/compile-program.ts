@@ -526,7 +526,10 @@ export function getDiagnosticsOfProgram(
 ): Diagnostic[] {
   const result: Diagnostic[] = [...program.getConfigFileParsingDiagnostics()];
   const configCount = result.length;
-  for (const d of program.getSyntacticDiagnostics()) result.push(d);
+  const syntactic = program.getSyntacticDiagnostics();
+  // A failed transform is a syntax error of its file: what content mappers failed with besides is reported too.
+  if (syntactic.length > 0) for (const d of program.program.getContentMapperDiagnostics()) result.push(d);
+  for (const d of syntactic) result.push(d);
   mark('syntactic diagnostics');
   if (result.length !== configCount) return result;
   for (const d of program.getProgramDiagnostics()) result.push(d);

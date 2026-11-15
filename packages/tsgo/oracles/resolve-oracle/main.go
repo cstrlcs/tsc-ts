@@ -115,6 +115,7 @@ type testCase struct {
 	Options                   options           `json:"options"`
 	TypingsLocation           string            `json:"typingsLocation"`
 	ProjectName               string            `json:"projectName"`
+	ExtraExtensions           []string          `json:"extraExtensions"`
 	Redirect                  *redirect         `json:"redirect"`
 	Requests                  []request         `json:"requests"`
 }
@@ -127,18 +128,19 @@ type packageID struct {
 }
 
 type result struct {
-	ResolvedFileName         string     `json:"resolvedFileName"`
-	OriginalPath             string     `json:"originalPath"`
-	Extension                string     `json:"extension"`
-	ResolvedUsingTsExtension bool       `json:"resolvedUsingTsExtension"`
-	IsExternalLibraryImport  bool       `json:"isExternalLibraryImport"`
-	PackageID                *packageID `json:"packageId"`
-	AlternateResult          string     `json:"alternateResult"`
-	Primary                  bool       `json:"primary"`
-	Diagnostics              []string   `json:"diagnostics"`
-	Traces                   []string   `json:"traces"`
-	Names                    []string   `json:"names,omitempty"`
-	Error                    string     `json:"error,omitempty"`
+	ResolvedFileName             string     `json:"resolvedFileName"`
+	OriginalPath                 string     `json:"originalPath"`
+	Extension                    string     `json:"extension"`
+	ResolvedUsingTsExtension     bool       `json:"resolvedUsingTsExtension"`
+	ResolvedUsingExtraExtensions bool       `json:"resolvedUsingExtraExtensions"`
+	IsExternalLibraryImport      bool       `json:"isExternalLibraryImport"`
+	PackageID                    *packageID `json:"packageId"`
+	AlternateResult              string     `json:"alternateResult"`
+	Primary                      bool       `json:"primary"`
+	Diagnostics                  []string   `json:"diagnostics"`
+	Traces                       []string   `json:"traces"`
+	Names                        []string   `json:"names,omitempty"`
+	Error                        string     `json:"error,omitempty"`
 }
 
 type host struct {
@@ -193,6 +195,7 @@ func run(c *testCase) []*result {
 		CompilerOptions: compilerOptions,
 		TypingsLocation: tspath.RootedDirectoryPath(c.TypingsLocation),
 		ProjectName:     c.ProjectName,
+		ExtraExtensions: c.ExtraExtensions,
 	})
 	var ref module.ResolvedProjectReference
 	if c.Redirect != nil {
@@ -228,6 +231,7 @@ func resolve(resolver *module.DefaultResolver, h *host, compilerOptions *core.Co
 		res.OriginalPath = string(r.OriginalPath)
 		res.Extension = r.Extension
 		res.ResolvedUsingTsExtension = r.ResolvedUsingTsExtension
+		res.ResolvedUsingExtraExtensions = r.ResolvedUsingExtraExtensions
 		res.IsExternalLibraryImport = r.IsExternalLibraryImport
 		res.PackageID = toPackageID(r.PackageId)
 		res.AlternateResult = string(r.AlternateResult)

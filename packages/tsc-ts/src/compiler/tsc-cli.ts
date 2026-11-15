@@ -3,7 +3,8 @@
  * tsconfig.json, `--showConfig`, program construction and `--listFilesOnly`.
  */
 import { mark } from './timeline.js';
-import type { ProcessChannel, ProcessSpawner } from './content-mapper-process-host.js';
+import { ContentMapperProjectSpec, type ContentMapperProject } from './content-mapper.js';
+import { ContentMapperProcessHost, type ProcessChannel, type ProcessSpawner } from './content-mapper-process-host.js';
 import { FileBuildInfoReader, readBuildInfoProgram, type Snapshot } from './incremental.js';
 import {
   createCompilerDiagnostic,
@@ -70,6 +71,8 @@ export abstract class System extends CommandLineHost implements ProcessSpawner {
   /** Whether the variable is set, perhaps to `''`. */
   abstract hasEnvironmentVariable(name: string): boolean;
   abstract write(text: string): void;
+  /** Writes `text` to standard error. */
+  abstract writeError(text: string): void;
   abstract fileExists(path: string): boolean;
   abstract directoryExists(path: string): boolean;
   abstract writeFile(path: string, text: string): boolean;
@@ -149,8 +152,9 @@ class SystemCompilerHost extends CompilerHost {
     private readonly sys: System,
     fs: FileSystem,
     private readonly locale: Locale,
+    contentMapperProject: ContentMapperProject | undefined = undefined,
   ) {
-    super(fs, sys.currentDirectory, sys.defaultLibraryPath);
+    super(fs, sys.currentDirectory, sys.defaultLibraryPath, contentMapperProject);
   }
 
   trace(message: MessageWithArgs): void {
@@ -438,12 +442,12 @@ function executeCompile(sys: System, commandLine: ParsedCommandLine): CommandLin
 
   const parseStart = performance.now();
   let buildInfo: EarlyBuildInfo | undefined = undefined;
-  const createProgram = (
-    host: CompilerHost = new SystemCompilerHost(sys, fs, locale),
-    loader?: FileLoader,
-  ): CommandLineResult => {
+  const createHost = (): CompilerHost => new SystemCompilerHost(sys, fs, locale, contentMapperProjectOf(sys, config));
+  const createProgram = (host: CompilerHost = createHost(), loader?: FileLoader): CommandLineResult => {
     mark('program start');
     const program = new Program(config, host, loader);
+    // The program is loaded: its content mappers stop.
+    host.closeContentMappers();
     mark(`program built, ${program.getSourceFiles().length} files`);
     const parseTime = performance.now() - parseStart;
     reportPreparedFiles(program.getSourceFiles().map((f) => f.fileName));
@@ -482,7 +486,7 @@ function executeCompile(sys: System, commandLine: ParsedCommandLine): CommandLin
           );
         // While the threads load files, the program's first step (a task per root file, which looks
         // the file up) runs, and the program's loader takes the files they return as they come.
-        const host = new SystemCompilerHost(sys, fs, locale);
+        const host = createHost();
         const loader = new FileLoader(host, config);
         let rootFilesAdded = false;
         // The build info lists the real paths of the `package.json` files module resolution looked up:
@@ -510,9 +514,11 @@ function executeCompile(sys: System, commandLine: ParsedCommandLine): CommandLin
             isIncremental(config.options) &&
             !result.program.hasAllPackageJsonLookups()
           ) {
-            const own = new FileLoader(host, config);
+            // A host of its own: the first one closed its content mappers.
+            const ownHost = createHost();
+            const own = new FileLoader(ownHost, config);
             own.takesPreparedResolutions = false;
-            result = createProgram(host, own);
+            result = createProgram(ownHost, own);
           }
           done(result);
           // The session's callbacks keep the loader: its tasks go once checking has started.
@@ -543,6 +549,24 @@ function executeCompile(sys: System, commandLine: ParsedCommandLine): CommandLin
   )
     assignSymbolIdsAtCreation();
   return createProgram();
+}
+
+/**
+ * The content mappers of `config` for the host of its program, each run as the process its package declares,
+ * which `sys` starts with the first file it transforms; `undefined` without `--runExternalCode`, which the
+ * config's mappers need to be read at all, and for a project without content mappers. The host closes them
+ * (`CompilerHost.closeContentMappers`). With the environment variable `TS_CONTENT_MAPPER_DEBUG` set, the
+ * messages exchanged with the mappers and what they write to standard error go to standard error, as in tsgo.
+ */
+function contentMapperProjectOf(sys: System, config: ProjectConfig): ContentMapperProject | undefined {
+  if (config.options.runExternalCode !== true || config.contentMappers.length === 0) return undefined;
+  const logger =
+    sys.getEnvironmentVariable('TS_CONTENT_MAPPER_DEBUG') !== ''
+      ? (message: string): void => sys.writeError(message + '\n')
+      : undefined;
+  return new ContentMapperProcessHost(sys, config.options.locale ?? '', logger).project(
+    new ContentMapperProjectSpec(config.configName, config.contentMappers, config.options),
+  );
 }
 
 /** Root file tasks the main thread adds each time a parse thread returns a chunk (`FileLoader.addRootFiles`). */
@@ -666,7 +690,11 @@ function listFilesOnly(
 ): ExitStatus {
   let diagnostics: Diagnostic[] = [...program.getConfigFileParsingDiagnostics()];
   const configDiagnosticsCount = diagnostics.length;
-  for (const diagnostic of program.getSyntacticDiagnostics()) diagnostics.push(diagnostic);
+  const syntactic = program.getSyntacticDiagnostics();
+  // A failed transform is a syntax error of its file: what content mappers failed with besides is reported too.
+  if (syntactic.length > 0)
+    for (const diagnostic of program.getContentMapperDiagnostics()) diagnostics.push(diagnostic);
+  for (const diagnostic of syntactic) diagnostics.push(diagnostic);
   if (diagnostics.length === configDiagnosticsCount) {
     for (const diagnostic of program.getProgramDiagnostics()) diagnostics.push(diagnostic);
   }

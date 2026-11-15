@@ -1,21 +1,30 @@
 // Compiles small projects reduced from real-world code through tsgo (packages/tsgo/dist/tsgo) and
 // tsc-ts (the Node build, or TSC_TS_BIN), and compares stdout, stderr, exit status and the files
-// written in the project's directory.
+// written in the project's directory. TypeScript's test cases of content mappers are among the projects, with
+// their mappers as processes (content-mapper-server.mjs) that both compilers find on PATH.
 // Set PROJECTS_FILTER to a substring of project names to run only those.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
-import { dirname, join, relative, resolve } from 'node:path';
+import { delimiter, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { tempDir } from './temp.mjs';
+import { writeMapperLaunchers } from './content-mapper-server.mjs';
+import { parseTestCase } from './module-resolution-cases.mjs';
+import { compileSources, tempDir } from './temp.mjs';
 import { tscTs, tscTsMissing } from './toolchain.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '../../..');
 const tsgo = join(root, 'packages/tsgo/dist/tsgo');
 const bundledLibs = join(root, 'upstream/TypeScript/tsc/internal/bundled/libs');
+const compilerCases = join(root, 'upstream/TypeScript/tsc/testdata/tests/cases/compiler');
 const skip = (!existsSync(tsgo) && 'needs packages/tsgo/dist/tsgo') || tscTsMissing;
+// A launcher for each content mapper of TypeScript's test cases, which a mapper's package.json names by its `exec`.
+const launchers = writeMapperLaunchers(
+  tempDir('tsc-ts-projects-mappers-'),
+  join(compileSources('tsc-ts-projects-', ['compiler/span-map.ts']), 'compiler/span-map.js'),
+);
 
 const base = { target: 'ES2022', strict: true, noEmit: true, types: [] };
 
@@ -1342,6 +1351,94 @@ projects.push([
   },
 ]);
 
+// ---- Content mapped files
+// TypeScript's test cases of content mappers, checked without emit: what the mappers report, the compiler's
+// diagnostics at their places in the original files, and the diagnostic directives of the mappers. These
+// projects are a list of their own: a mapper has five seconds to start, so few of them run at a time.
+const mapperProjects = [];
+const omittedMapperCases = [
+  // Errors of checking how the import paths of mapped files are rewritten in the output, which tsc-ts does not report.
+  'contentMapperOutputExtensionsImportHelpers.ts',
+  'contentMapperOutputExtensionsTypeOnlyUnsafeRewrite.ts',
+  'contentMapperOutputExtensionsUnsafeRewrite.ts',
+  // Its diagnostic names a file by its absolute name, and each compiler has a directory of its own here.
+  'contentMapperSupplementalFileCollision.ts',
+];
+if (existsSync(compilerCases))
+  for (const name of readdirSync(compilerCases).sort()) {
+    if (!name.startsWith('contentMapper') || omittedMapperCases.includes(name)) continue;
+    const parsed = parseTestCase(readFileSync(join(compilerCases, name), 'utf8'), name);
+    const files = {};
+    for (const file of parsed.files) files[file.name.slice(1)] = file.content;
+    for (const [link, target] of Object.entries(parsed.symlinks))
+      files[link.slice(1)] = { link: relative(dirname(link), target) };
+    mapperProjects.push([`content mapper case ${name}`, files, ['--runExternalCode', '--noEmit']]);
+  }
+
+const mapperPackage = (exec) =>
+  JSON.stringify({ name: 'mapper', version: '1.0.0', typescript: { contentMapper: { exec: [exec] } } });
+const mapped = { strict: true, noEmit: true, module: 'esnext', moduleResolution: 'bundler', types: [] };
+mapperProjects.push(
+  [
+    // The mapper's preamble declares a constant in each file: files that are scripts declare it twice.
+    'content mapped files that are modules by their virtual extension',
+    {
+      'tsconfig.json': JSON.stringify({
+        compilerOptions: mapped,
+        contentMappers: [{ package: 'mapper', extensions: ['.box'] }],
+      }),
+      'node_modules/mapper/package.json': mapperPackage('compiler-test-mapper'),
+      'a.box': '// @box-extension: .mts\nconst a = 1;\n',
+      'b.box': '// @box-extension: .cts\nconst b = 1;\n',
+      'c.box': 'const c = 1;\n',
+      'd.box': '// @box-extension: .tsx\nconst d = 1;\n',
+    },
+    ['--runExternalCode'],
+  ],
+  [
+    // A directive of the mapper leaves out the compiler's errors on the next line, and one that expects an
+    // error and finds none is an error of the mapper's. TypeScript's own case has syntax errors, so it checks nothing.
+    'diagnostic directives of a content mapper',
+    {
+      'tsconfig.json': JSON.stringify({
+        compilerOptions: mapped,
+        contentMappers: [{ package: 'mapper', extensions: ['.box'] }],
+      }),
+      'node_modules/mapper/package.json': mapperPackage('compiler-test-mapper'),
+      'widget.box': [
+        '// @box-ignore',
+        'export const ignored: string = 1;',
+        '// @box-expect-error: Unused directive of the box.',
+        'export const expected: string = 2;',
+        '// @box-expect-error: Another unused directive of the box.',
+        'export const fine = 3;',
+        'export const reported: string = 4;',
+        '// @ts-expect-error',
+        'export const suppressed: string = 5;',
+        '// @ts-expect-error',
+        'export const unused = 6;',
+        '',
+      ].join('\n'),
+    },
+    ['--runExternalCode'],
+  ],
+  [
+    // Five failures are reported in their files, then the mapper is, and its other files are empty modules.
+    'a content mapper that fails more often than it may',
+    {
+      'tsconfig.json': JSON.stringify({
+        compilerOptions: mapped,
+        contentMappers: [{ package: 'mapper', extensions: ['.box'] }],
+      }),
+      'node_modules/mapper/package.json': mapperPackage('failing-mapper'),
+      ...Object.fromEntries([1, 2, 3, 4, 5, 6, 7].map((n) => [`f${n}.box`, `export const f${n} = ${n};\n`])),
+      'main.ts': 'import { f1 } from "./f1.box";\nexport const main = f1;\n',
+    },
+    // tsgo transforms files on several threads, in no fixed order.
+    ['--runExternalCode', '--singleThreaded'],
+  ],
+);
+
 /** Writes `files`; a `{ link }` value is a symlink to the relative path `link`. */
 function writeFiles(dir, files) {
   for (const [path, content] of Object.entries(files)) {
@@ -1365,7 +1462,11 @@ function readOutputs(root, dir, inputs, outputs = {}) {
 function run(command, files, args) {
   const cwd = tempDir('tsc-ts-projects-');
   writeFiles(cwd, files);
-  const env = { PATH: process.env.PATH ?? '', TSC_TS_LIB_DIR: bundledLibs, NO_COLOR: '1' };
+  const env = {
+    PATH: `${launchers}${delimiter}${process.env.PATH ?? ''}`,
+    TSC_TS_LIB_DIR: bundledLibs,
+    NO_COLOR: '1',
+  };
   return new Promise((done) => {
     execFile(
       command[0],
@@ -1379,13 +1480,19 @@ function run(command, files, args) {
   });
 }
 
-test('projects reduced from real-world code match tsgo', { skip, timeout: 300_000 }, async () => {
+/**
+ * Compiles each of `list` with both compilers, at most `limit` projects at a time, and returns what differs, by
+ * project. PROJECTS_FILTER leaves out the others.
+ */
+async function compare(list, limit) {
   const filter = process.env.PROJECTS_FILTER;
+  const selected = list.filter(([name]) => filter === undefined || name.includes(filter));
   const failures = [];
+  let next = 0;
   await Promise.all(
-    projects
-      .filter(([name]) => filter === undefined || name.includes(filter))
-      .map(async ([name, source, args = []]) => {
+    Array.from({ length: Math.min(limit, selected.length) }, async () => {
+      while (next < selected.length) {
+        const [name, source, args = []] = selected[next++];
         const files =
           'tsconfig.json' in source
             ? source
@@ -1401,7 +1508,16 @@ test('projects reduced from real-world code match tsgo', { skip, timeout: 300_00
           if (expected.outputs[path] !== actual.outputs[path])
             problems.push(`${path}\n  tsgo: ${expected.outputs[path]}\n  ours: ${actual.outputs[path]}`);
         if (problems.length > 0) failures.push(`${name}: ${problems.join('\n')}`);
-      }),
+      }
+    }),
   );
-  assert.deepEqual(failures, []);
+  return failures;
+}
+
+test('projects reduced from real-world code match tsgo', { skip, timeout: 300_000 }, async () => {
+  assert.deepEqual(await compare(projects, projects.length), []);
+});
+
+test('projects with content mapped files match tsgo', { skip, timeout: 300_000 }, async () => {
+  assert.deepEqual(await compare(mapperProjects, 4), []);
 });
