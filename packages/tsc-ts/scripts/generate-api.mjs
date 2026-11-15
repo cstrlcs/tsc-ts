@@ -7,9 +7,9 @@
 //   src/library/ast.generated.ts               the node interfaces, from tools/scripts/tsc/ast.json through
 //                                              the schema model (tools/scripts/tsc/schema.ts), as
 //                                              tools/scripts/tsc/generate-ts-ast.ts generates them, with tsc-ts's
-//                                              NodeList and ModifierList in place of NodeArray, without
-//                                              brand members, and with members typed as tsc-ts's nodes
-//                                              hold them
+//                                              NodeList and ModifierList in place of NodeArray, with
+//                                              its brand members optional, and with members typed as
+//                                              tsc-ts's nodes hold them
 //   src/library/is.generated.ts                the type guards of the node interfaces, from the same schema,
 //                                              as tools/scripts/tsc/generate-ts-ast.ts generates TypeScript 7's
 //                                              is.generated.ts
@@ -224,13 +224,16 @@ function generateAst(api) {
   parts.push('');
   for (const base of api.bases()) {
     if (goOnlyBases.has(base.key)) continue;
-    // Without TypeScript 7's brand members (`_expressionBrand`): node kinds discriminate, and an
-    // implementation of these interfaces outside tsc-ts would have to copy the brand hierarchy.
+    // TypeScript 7's brand members (`_expressionBrand`), optional and never set: tsc-ts's nodes don't have
+    // them, and an implementation of these interfaces outside tsc-ts needs none. They make bases with the
+    // same members different types, so that the false branch of a guard (`!isExpression(node)`) keeps the
+    // other members of a union of them.
+    const brand = base.brand ? `\n  readonly ${base.brand}?: never;` : '';
     const fields = base.fields
       .filter((field) => !field.noTS)
       .map((field) => baseMember(field, base))
       .join('');
-    parts.push(`export interface ${baseTsName(base)} extends ${resolveBaseExtends(base)} {${fields}\n}`);
+    parts.push(`export interface ${baseTsName(base)} extends ${resolveBaseExtends(base)} {${brand}${fields}\n}`);
   }
   parts.push('');
   const variants = [];

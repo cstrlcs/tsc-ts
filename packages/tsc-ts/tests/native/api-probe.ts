@@ -24,12 +24,14 @@ import {
   isCallExpression,
   isClassLikeDeclaration,
   isExpression,
+  isExpressionStatement,
   isFunctionLikeDeclaration,
   isIdentifier,
   isImportDeclaration,
   isModifier,
   isPropertyAccessExpression,
   isTokenKind,
+  isTypeAliasDeclaration,
   isTypeNode,
   isVariableDeclaration,
   type Node,
@@ -41,12 +43,14 @@ import {
   SignatureKind,
   skipTrivia,
   type SourceFile,
+  type Statement,
   type Symbol,
   SymbolFlags,
   symbolName,
   SyntaxKind,
   type Type,
   type TupleTypeReference,
+  type TypeNode,
   type TypeChecker,
   walkPreorder,
 } from '../../src/library/index.js';
@@ -127,7 +131,7 @@ function probe(program: Program, checker: TypeChecker): void {
       if (isFunctionLikeDeclaration(node)) print(`  function ${node.parameters.nodes.length} ${nodeText(node.body)}`);
       if (hasInitializer(node)) print(`  initializer ${nodeText(node.initializer)}`);
       print(
-        `  guards ${isExpression(node)} ${isTypeNode(node)} ${isModifier(node)} ${isTokenKind(node.kind)} ${isAssignmentOperator(node.kind)}`,
+        `  guards ${kindGroup(node)} ${isModifier(node)} ${isTokenKind(node.kind)} ${isAssignmentOperator(node.kind)}`,
       );
       const tags = getJSDocTags(node);
       if (tags.length > 0) print(`  tags ${tags.map((tag) => `${tag.tagName.text}:${tag.pos}`).join(',')}`);
@@ -141,7 +145,15 @@ function probe(program: Program, checker: TypeChecker): void {
       }
     });
   }
-  for (const file of program.getSourceFiles()) if (!program.isSourceFileDefaultLibrary(file)) probeTokens(file);
+  for (const file of program.getSourceFiles()) {
+    if (program.isSourceFileDefaultLibrary(file)) continue;
+    probeTokens(file);
+    for (const statement of file.statements.nodes) {
+      print(`group ${nodeGroup(statement)}`);
+      if (isExpressionStatement(statement)) print(`group ${nodeGroup(statement.expression)}`);
+      if (isTypeAliasDeclaration(statement)) print(`group ${nodeGroup(statement.type)}`);
+    }
+  }
   for (const symbol of symbols.slice(0, 400)) {
     print(`symbol ${symbolText(symbol)}`);
     print(`  type ${keep(checker.getTypeOfSymbol(symbol))}`);
@@ -157,6 +169,7 @@ function probe(program: Program, checker: TypeChecker): void {
     const type = types[i]!;
     print(`type ${type.flags >>> 0} ${checker.typeToString(type)}`);
     print(`  symbol ${symbolText(type.getSymbol())} alias ${symbolText(type.getAliasSymbol())}`);
+    print(`  group ${typeGroup(type)}`);
     print(`  properties ${checker.getPropertiesOfType(type).map(symbolName).join(',')}`);
     for (const kind of [SignatureKind.Call, SignatureKind.Construct])
       for (const signature of checker.getSignaturesOfType(type, kind))
@@ -248,6 +261,31 @@ function probeTokens(file: SourceFile): void {
     }
     if (kind === SyntaxKind.EndOfFile) break;
   }
+}
+
+/**
+ * What a statement, expression or type node is, by the guards. The three have the same members: this compiles
+ * because the false branch of a guard leaves the other two.
+ */
+function nodeGroup(node: Statement | Expression | TypeNode): string {
+  if (isExpression(node)) return 'expression';
+  if (isTypeNode(node)) return 'type node';
+  return `statement ${node.kind}`;
+}
+
+/** What any node is, by the same guards: the false branch of each leaves the node. */
+function kindGroup(node: Node): string {
+  if (isExpression(node)) return 'expression';
+  if (isTypeNode(node)) return 'type node';
+  return `other ${node.kind}`;
+}
+
+/** What a type is, by its guards, whose false branches leave the type. */
+function typeGroup(type: Type): string {
+  if (type.isUnionType()) return `union of ${type.getTypes().length}`;
+  if (type.isIntersectionType()) return `intersection of ${type.getTypes().length}`;
+  if (type.isObjectType()) return `object ${type.objectFlags >>> 0}`;
+  return `other ${type.flags >>> 0}`;
 }
 
 function isTupleTypeReference(type: Type): type is TupleTypeReference {

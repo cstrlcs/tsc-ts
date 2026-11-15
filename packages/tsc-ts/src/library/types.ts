@@ -132,7 +132,13 @@ export interface BooleanLiteralType extends LiteralType {
   readonly value: boolean;
 }
 
-export interface ObjectType extends Type {}
+// ObjectType, UnionType and IntersectionType have the members of every type. Each declares an optional brand
+// member, which no type has, so that the checker takes them for different types: without it, the false branch
+// of `type.isUnionType()` would leave no type.
+
+export interface ObjectType extends Type {
+  readonly _objectTypeBrand?: never;
+}
 
 export interface TypeReference extends ObjectType {
   getTarget(): Type;
@@ -156,9 +162,13 @@ export interface TupleTypeReference extends TypeReference {}
 
 export interface UnionOrIntersectionType extends Type {}
 
-export interface UnionType extends UnionOrIntersectionType {}
+export interface UnionType extends UnionOrIntersectionType {
+  readonly _unionTypeBrand?: never;
+}
 
-export interface IntersectionType extends UnionOrIntersectionType {}
+export interface IntersectionType extends UnionOrIntersectionType {
+  readonly _intersectionTypeBrand?: never;
+}
 
 export interface TypeParameter extends Type {
   /** Whether this is the `this` type of a class, interface or tuple. */

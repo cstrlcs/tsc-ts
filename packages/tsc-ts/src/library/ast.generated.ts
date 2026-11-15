@@ -485,27 +485,48 @@ export type LogicalOrCoalescingAssignmentOperator =
 export interface NodeBase extends Node {
   readonly flags: NodeFlags;
 }
-export interface StatementBase extends NodeBase {}
+export interface StatementBase extends NodeBase {
+  readonly _statementBrand?: never;
+}
 export interface IterationStatementBase extends StatementBase {
   readonly statement: Statement;
 }
-export interface ExpressionBase extends NodeBase {}
-export interface UnaryExpressionBase extends ExpressionBase {}
-export interface UpdateExpressionBase extends UnaryExpressionBase {}
-export interface LeftHandSideExpressionBase extends UpdateExpressionBase {}
-export interface MemberExpressionBase extends LeftHandSideExpressionBase {}
-export interface PrimaryExpressionBase extends MemberExpressionBase {}
-export interface TypeNodeBase extends NodeBase {}
+export interface ExpressionBase extends NodeBase {
+  readonly _expressionBrand?: never;
+}
+export interface UnaryExpressionBase extends ExpressionBase {
+  readonly _unaryExpressionBrand?: never;
+}
+export interface UpdateExpressionBase extends UnaryExpressionBase {
+  readonly _updateExpressionBrand?: never;
+}
+export interface LeftHandSideExpressionBase extends UpdateExpressionBase {
+  readonly _leftHandSideExpressionBrand?: never;
+}
+export interface MemberExpressionBase extends LeftHandSideExpressionBase {
+  readonly _memberExpressionBrand?: never;
+}
+export interface PrimaryExpressionBase extends MemberExpressionBase {
+  readonly _primaryExpressionBrand?: never;
+}
+export interface TypeNodeBase extends NodeBase {
+  readonly _typeNodeBrand?: never;
+}
 export interface NodeWithTypeArgumentsBase extends TypeNodeBase {
   readonly typeArguments?: NodeList<TypeNode> | undefined;
 }
-export interface JSDocTypeBase extends TypeNodeBase {}
-export interface DeclarationBase extends Node {}
+export interface JSDocTypeBase extends TypeNodeBase {
+  readonly _jsDocTypeBrand?: never;
+}
+export interface DeclarationBase extends Node {
+  readonly _declarationBrand?: never;
+}
 export interface ModifiersBase extends Node {
   readonly modifiers?: ModifierList<ModifierLike> | undefined;
   readonly modifierFlags: ModifierFlags;
 }
 export interface FunctionLikeBase extends Node {
+  readonly _declarationBrand?: never;
   readonly typeParameters?: NodeList<TypeParameterDeclaration> | undefined;
   readonly parameters: NodeList<ParameterDeclaration>;
   readonly type?: TypeNode | undefined;
@@ -516,9 +537,11 @@ export interface BodyBase extends Node {
   readonly body?: NodeBody | undefined;
 }
 export interface FunctionLikeWithBodyBase extends FunctionLikeBase, BodyBase {
+  readonly _functionLikeDeclarationBrand?: never;
   readonly body?: BlockOrExpression | undefined;
 }
 export interface ClassLikeBase extends ModifiersBase {
+  readonly _declarationBrand?: never;
   readonly name?: Identifier | undefined;
   readonly typeParameters?: NodeList<TypeParameterDeclaration> | undefined;
   readonly heritageClauses?: NodeList<HeritageClause> | undefined;
@@ -528,18 +551,27 @@ export interface LiteralLikeNodeBase extends Node {
   readonly text: string;
   readonly tokenFlags: TokenFlags;
 }
-export interface LiteralExpressionBase extends PrimaryExpressionBase, LiteralLikeNodeBase {}
+export interface LiteralExpressionBase extends PrimaryExpressionBase, LiteralLikeNodeBase {
+  readonly _literalExpressionBrand?: never;
+}
 export interface TemplateLiteralLikeNodeBase extends LiteralLikeNodeBase {
   readonly rawText?: string | undefined;
   readonly templateFlags: TokenFlags;
 }
-export interface TypeElementBase extends DeclarationBase {}
-export interface ClassElementBase extends DeclarationBase {}
+export interface TypeElementBase extends DeclarationBase {
+  readonly _typeElementBrand?: never;
+}
+export interface ClassElementBase extends DeclarationBase {
+  readonly _classElementBrand?: never;
+}
 export interface NamedMemberBase extends ModifiersBase {
+  readonly _declarationBrand?: never;
   readonly name: PropertyName;
   readonly postfixToken?: QuestionToken | ExclamationToken | undefined;
 }
-export interface ObjectLiteralElementBase extends DeclarationBase {}
+export interface ObjectLiteralElementBase extends DeclarationBase {
+  readonly _objectLiteralBrand?: never;
+}
 export interface UnionOrIntersectionTypeNodeBase extends TypeNodeBase {
   readonly types: NodeList<TypeNode>;
 }
