@@ -668,6 +668,52 @@ test(
 );
 
 test(
+  'declarations keep the TypeScript extensions of import paths that JavaScript output rewrites',
+  { skip: !existsSync(tsgo) && 'needs packages/tsgo/dist/tsgo' },
+  async () => {
+    // Only the extension of a content mapper's file is rewritten in declarations: a TypeScript file is named
+    // as written, also in the import types the checker writes.
+    const { expected, actual } = await emitBoth(
+      {
+        'model.ts': [
+          'export interface Model { value: string; }',
+          'export function make(): Model { return { value: "" }; }',
+        ],
+        'index.ts': [
+          'import { make } from "./model.ts";',
+          'export { make } from "./model.ts";',
+          'export type { Model } from "./model.ts";',
+          'export type Written = import("./model.ts").Model;',
+          'export const inferred = make();',
+        ],
+      },
+      'index.d.ts',
+      [
+        '--ignoreConfig',
+        '--noLib',
+        '--strict',
+        '--module',
+        'preserve',
+        '--target',
+        'esnext',
+        '--rewriteRelativeImportExtensions',
+      ],
+    );
+    assert.equal(
+      expected,
+      [
+        'export { make } from "./model.ts";',
+        'export type { Model } from "./model.ts";',
+        'export type Written = import("./model.ts").Model;',
+        'export declare const inferred: import("./model.ts").Model;',
+        '',
+      ].join('\n'),
+    );
+    assert.equal(actual, expected);
+  },
+);
+
+test(
   'declaration maps leave reused and checker-written types unmapped, as tsgo does',
   { skip: !existsSync(tsgo) && 'needs packages/tsgo/dist/tsgo' },
   async () => {

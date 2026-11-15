@@ -137,6 +137,7 @@ import type { SpreadIndices } from './checker-contextual.js';
 import { SourceFileMetadata, getEmitModuleFormatOfFile } from './program-utilities.js';
 import type { GrammarChecker } from './checker-grammar.js';
 import type { ResolvedModule } from './module-resolution-types.js';
+import type { ParsedCommandLine } from './tsconfig.js';
 import type { ModuleSpecifierHost } from './module-specifiers.js';
 import type { PropertyListIndex } from './checker-members.js';
 import { startThreadSharing, type ThreadSharing } from './shared-results.js';
@@ -208,6 +209,14 @@ export abstract class CheckerHost {
   }
   /** What module specifier generation needs; without it, specifiers are relative paths. */
   getModuleSpecifierHost(): ModuleSpecifierHost | undefined {
+    return undefined;
+  }
+  /** Whether emit writes outputs for `file` (`Program.sourceFileMayBeEmitted`): by default, unless it is a library. */
+  sourceFileMayBeEmitted(file: SourceFile): boolean {
+    return !this.isSourceFileDefaultLibrary(file);
+  }
+  /** The referenced project that `file` is a source or a declaration output of, if any. */
+  getRedirectForResolution(_file: SourceFile): ParsedCommandLine | undefined {
     return undefined;
   }
 }

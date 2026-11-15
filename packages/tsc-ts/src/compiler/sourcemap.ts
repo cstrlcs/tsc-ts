@@ -228,6 +228,16 @@ export class SourceMapGenerator {
     return true;
   }
 
+  /** Adds a mapping without a source position, for generated text that no source text stands for. */
+  addGeneratedMapping(generatedLine: number, generatedCharacter: number): boolean {
+    if (generatedLine < this.pendingGeneratedLine) throw new Error('generatedLine cannot backtrack');
+    if (generatedCharacter < 0) throw new Error('generatedCharacter cannot be negative');
+    this.addMapping(generatedLine, generatedCharacter, -1, -1, -1, -1);
+    this.hasPendingSource = false;
+    this.hasPendingName = false;
+    return true;
+  }
+
   addSourceMapping(
     generatedLine: number,
     generatedCharacter: number,
@@ -240,6 +250,14 @@ export class SourceMapGenerator {
     if (sourceIndex < 0 || sourceIndex >= this.sources.length) throw new Error('sourceIndex is out of range');
     if (sourceLine < 0) throw new Error('sourceLine cannot be negative');
     if (sourceCharacter < 0) throw new Error('sourceCharacter cannot be negative');
+    // A mapping without a source position keeps its generated position to itself.
+    if (
+      this.hasPending &&
+      this.pendingGeneratedLine === generatedLine &&
+      this.pendingGeneratedCharacter === generatedCharacter &&
+      !this.hasPendingSource
+    )
+      return true;
     return this.addMapping(generatedLine, generatedCharacter, sourceIndex, sourceLine, sourceCharacter, -1);
   }
 

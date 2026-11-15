@@ -38,7 +38,11 @@ import { TokenFlags } from '../types.js';
 import { CommonJSModuleTransformer } from './commonjs-module.js';
 import type { EmitResolver } from './emit-resolver.js';
 import { createExternalHelpersImportDeclarationIfNeeded } from './external-module-info.js';
-import { createRequireCallArguments, rewriteModuleSpecifier } from './module-utilities.js';
+import {
+  type ImportExtensionRewrites,
+  createRequireCallArguments,
+  rewriteModuleSpecifier,
+} from './module-utilities.js';
 import { Transformer } from './transformer.js';
 import { hasSyntacticModifier, isExternalModule, singleOrMany } from './utilities.js';
 
@@ -91,11 +95,12 @@ export function createModuleTransformer(
   options: CompilerOptions,
   resolver: EmitResolver,
   formats: ModuleFormatHost,
+  extensions: ImportExtensionRewrites,
 ): Transformer {
   switch (getEmitModuleKind(options)) {
     case ModuleKind.Preserve:
       // ES module output also keeps CommonJS syntax for `module: preserve`.
-      return new ESModuleTransformer(context, options, formats);
+      return new ESModuleTransformer(context, options, formats, extensions);
     case ModuleKind.ESNext:
     case ModuleKind.ES2022:
     case ModuleKind.ES2020:
@@ -105,9 +110,9 @@ export function createModuleTransformer(
     case ModuleKind.Node16:
     case ModuleKind.NodeNext:
     case ModuleKind.CommonJS:
-      return new ImpliedModuleTransformer(context, options, resolver, formats);
+      return new ImpliedModuleTransformer(context, options, resolver, formats, extensions);
   }
-  return new CommonJSModuleTransformer(context, options, resolver, formats);
+  return new CommonJSModuleTransformer(context, options, resolver, formats, extensions);
 }
 
 /** Emits each file as an ES module or as CommonJS, by its format. */
@@ -115,14 +120,22 @@ export class ImpliedModuleTransformer extends Transformer {
   readonly options: CompilerOptions;
   readonly resolver: EmitResolver;
   readonly formats: ModuleFormatHost;
+  readonly extensions: ImportExtensionRewrites;
   private esm: ESModuleTransformer | undefined;
   private commonjs: CommonJSModuleTransformer | undefined;
 
-  constructor(context: EmitContext, options: CompilerOptions, resolver: EmitResolver, formats: ModuleFormatHost) {
+  constructor(
+    context: EmitContext,
+    options: CompilerOptions,
+    resolver: EmitResolver,
+    formats: ModuleFormatHost,
+    extensions: ImportExtensionRewrites,
+  ) {
     super(context);
     this.options = options;
     this.resolver = resolver;
     this.formats = formats;
+    this.extensions = extensions;
     this.esm = undefined;
     this.commonjs = undefined;
   }
@@ -130,11 +143,18 @@ export class ImpliedModuleTransformer extends Transformer {
   visit(node: Node): Node | undefined {
     if (!(node instanceof SourceFile) || node.isDeclarationFile) return node;
     if (this.formats.getEmitModuleFormat(node.fileName) >= ModuleKind.ES2015) {
-      if (this.esm === undefined) this.esm = new ESModuleTransformer(this.context, this.options, this.formats);
+      if (this.esm === undefined)
+        this.esm = new ESModuleTransformer(this.context, this.options, this.formats, this.extensions);
       return this.esm.transformSourceFile(node);
     }
     if (this.commonjs === undefined)
-      this.commonjs = new CommonJSModuleTransformer(this.context, this.options, this.resolver, this.formats);
+      this.commonjs = new CommonJSModuleTransformer(
+        this.context,
+        this.options,
+        this.resolver,
+        this.formats,
+        this.extensions,
+      );
     return this.commonjs.transformSourceFile(node);
   }
 }
@@ -143,15 +163,22 @@ export class ImpliedModuleTransformer extends Transformer {
 export class ESModuleTransformer extends Transformer {
   readonly options: CompilerOptions;
   readonly formats: ModuleFormatHost;
+  readonly extensions: ImportExtensionRewrites;
   private currentSourceFile: SourceFile | undefined;
   /** `import { createRequire } from "module"` and `const __require = ...`, once a file needs them. */
   private requireStatements: Node[] | undefined;
   private requireHelperName: Identifier | undefined;
 
-  constructor(context: EmitContext, options: CompilerOptions, formats: ModuleFormatHost) {
+  constructor(
+    context: EmitContext,
+    options: CompilerOptions,
+    formats: ModuleFormatHost,
+    extensions: ImportExtensionRewrites,
+  ) {
     super(context);
     this.options = options;
     this.formats = formats;
+    this.extensions = extensions;
     this.currentSourceFile = undefined;
     this.requireStatements = undefined;
     this.requireHelperName = undefined;
@@ -264,7 +291,7 @@ export class ESModuleTransformer extends Transformer {
       node,
       undefined,
       clause instanceof ImportClause ? (clause as ImportClause) : undefined,
-      rewriteModuleSpecifier(this.context, node.moduleSpecifier, this.options),
+      rewriteModuleSpecifier(this.context, node.moduleSpecifier, this.options, this.extensions),
       this.importAttributes(node.attributes),
     );
   }
@@ -330,7 +357,7 @@ export class ESModuleTransformer extends Transformer {
   private visitExportDeclaration(node: ExportDeclaration): Node | undefined {
     if (node.moduleSpecifier === undefined) return node;
     const factory = this.factory;
-    const specifier = rewriteModuleSpecifier(this.context, node.moduleSpecifier, this.options);
+    const specifier = rewriteModuleSpecifier(this.context, node.moduleSpecifier, this.options, this.extensions);
     const clause = node.exportClause;
     const module = this.options.module;
     if ((module !== undefined && module > ModuleKind.ES2015) || !(clause instanceof NamespaceExport))
@@ -387,8 +414,13 @@ export class ESModuleTransformer extends Transformer {
     const first = args[0];
     const argument =
       first instanceof StringLiteral || first instanceof NoSubstitutionTemplateLiteral
-        ? rewriteModuleSpecifier(this.context, first, this.options)
-        : factory.createRewriteRelativeImportExtensionsHelper(first, this.options.jsx === JsxEmit.Preserve);
+        ? rewriteModuleSpecifier(this.context, first, this.options, this.extensions)
+        : factory.createRewriteRelativeImportExtensionsHelper(
+            first,
+            this.options.jsx === JsxEmit.Preserve,
+            this.extensions.rewrites,
+            !this.extensions.useCaseSensitiveFileNames,
+          );
     const rest = this.visitArray(args.slice(1));
     return factory.updateCallExpression(
       node,
@@ -407,7 +439,7 @@ export class ESModuleTransformer extends Transformer {
 
   private createRequireCall(node: Node): Node {
     const factory = this.factory;
-    const args = createRequireCallArguments(this.context, node, this.options);
+    const args = createRequireCallArguments(this.context, node, this.options, this.extensions);
     if (getEmitModuleKind(this.options) === ModuleKind.Preserve)
       return factory.createCallExpression(factory.createIdentifier('require'), args);
     let helperName = this.requireHelperName;

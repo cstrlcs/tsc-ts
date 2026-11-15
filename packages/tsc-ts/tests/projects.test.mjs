@@ -1210,6 +1210,102 @@ projects.push(
     ['-p', 'app'],
   ],
   [
+    // Under `rewriteRelativeImportExtensions`, emit rewrites a relative path that ends with a TypeScript
+    // extension: one that names a directory is rewritten wrongly (TS2876), and one through the package's
+    // `imports` names an input file and is not rewritten (TS2877). An import type is not checked.
+    'import paths that emit rewrites wrongly or not at all',
+    {
+      'package.json': JSON.stringify({
+        name: 'pkg',
+        type: 'module',
+        imports: { '#exact.ts': './exact.ts', '#internal/*': './internal/*' },
+      }),
+      'dir.ts/index.ts': 'export const dir = 1;\nexport type Dir = number;\n',
+      'exact.ts': 'export const exact = 1;\n',
+      'internal/inner.ts': 'export const inner = 1;\n',
+      'node_modules/dep/package.json': JSON.stringify({ name: 'dep', version: '1.0.0' }),
+      'node_modules/dep/add.ts': 'export const add = 1;\n',
+      'main.ts':
+        'import { dir } from "./dir.ts";\nimport type { Dir } from "./dir.ts";\n' +
+        'import { exact } from "#exact.ts";\nimport { inner } from "#internal/inner.ts";\n' +
+        'import { add } from "dep/add.ts";\nimport { same } from "./same.ts";\n' +
+        'export const all: Dir[] = [dir, exact, inner, add, same];\n' +
+        'export const later = import("./dir.ts");\nexport type Later = typeof import("./dir.ts");\n',
+      'same.ts': 'export const same = 1;\n',
+      'tsconfig.json': JSON.stringify({
+        compilerOptions: {
+          target: 'ES2022',
+          module: 'preserve',
+          strict: true,
+          rewriteRelativeImportExtensions: true,
+          outDir: 'out',
+          types: [],
+        },
+        files: ['main.ts'],
+      }),
+    },
+  ],
+  [
+    // A rewritten path into a referenced project leads to its output only when the output directories of the
+    // two projects lie as their root directories do: else it is an error (TS2878).
+    'rewritten import paths into referenced projects',
+    {
+      'lib/index.ts': 'export const lib = 1;\n',
+      'lib/index.d.ts': 'export declare const lib = 1;\n',
+      'lib/tsconfig.json': JSON.stringify({
+        compilerOptions: { composite: true, module: 'nodenext', types: [] },
+        files: ['index.ts'],
+      }),
+      'same/index.ts': 'export const same = 1;\n',
+      'out/same/index.d.ts': 'export declare const same = 1;\n',
+      'same/tsconfig.json': JSON.stringify({
+        compilerOptions: { composite: true, outDir: '../out/same', module: 'nodenext', types: [] },
+        files: ['index.ts'],
+      }),
+      'app/main.ts':
+        'import { lib } from "../lib/index.ts";\nimport { same } from "../same/index.ts";\n' +
+        'export const all = [lib, same];\n',
+      'app/tsconfig.json': JSON.stringify({
+        compilerOptions: {
+          target: 'ES2022',
+          module: 'nodenext',
+          strict: true,
+          rewriteRelativeImportExtensions: true,
+          outDir: '../out/app',
+          types: [],
+        },
+        files: ['main.ts'],
+        references: [{ path: '../lib' }, { path: '../same' }],
+      }),
+    },
+    ['-p', 'app'],
+  ],
+  [
+    // An import or `require` of a path that is not a literal is rewritten at run time by a helper, which
+    // `importHelpers` takes from tslib.
+    'the helper that rewrites import paths at run time is missing from tslib',
+    {
+      'node_modules/tslib/package.json': JSON.stringify({ name: 'tslib', version: '1.0.0', types: 'index.d.ts' }),
+      'node_modules/tslib/index.d.ts': 'export declare function __importStar(module: any): any;\n',
+      'main.ts': 'export function load(path: string) {\n  return import(path);\n}\n',
+      'required.js': '/** @param {string} path */\nexport function load(path) {\n  return require(path);\n}\n',
+      'globals.d.ts': 'declare function require(path: string): unknown;\n',
+      'tsconfig.json': JSON.stringify({
+        compilerOptions: {
+          target: 'ES2022',
+          module: 'preserve',
+          strict: true,
+          rewriteRelativeImportExtensions: true,
+          importHelpers: true,
+          allowJs: true,
+          checkJs: true,
+          outDir: 'out',
+          types: [],
+        },
+      }),
+    },
+  ],
+  [
     // `declare module 'foo';` comes first, so it is the module symbol's value declaration, and the default
     // import still resolves to the `default` export of the declaration with a body (issue #417).
     'a default import of a shorthand ambient module merged with a declaration with a body',
@@ -1352,27 +1448,36 @@ projects.push([
 ]);
 
 // ---- Content mapped files
-// TypeScript's test cases of content mappers, checked without emit: what the mappers report, the compiler's
-// diagnostics at their places in the original files, and the diagnostic directives of the mappers. These
-// projects are a list of their own: a mapper has five seconds to start, so few of them run at a time.
+// TypeScript's test cases of content mappers: what the mappers report, the compiler's diagnostics at their places
+// in the original files, the diagnostic directives of the mappers, and the files written for a project with mapped
+// files (no JavaScript for a mapped file, its declarations and their names, declaration maps into the original
+// text, import paths rewritten to the extensions the mappers name). These projects are a list of their own: a
+// mapper has five seconds to start, so few of them run at a time.
 const mapperProjects = [];
-const omittedMapperCases = [
-  // Errors of checking how the import paths of mapped files are rewritten in the output, which tsc-ts does not report.
-  'contentMapperOutputExtensionsImportHelpers.ts',
-  'contentMapperOutputExtensionsTypeOnlyUnsafeRewrite.ts',
-  'contentMapperOutputExtensionsUnsafeRewrite.ts',
-  // Its diagnostic names a file by its absolute name, and each compiler has a directory of its own here.
-  'contentMapperSupplementalFileCollision.ts',
-];
+// The options a case's headers give besides its tsconfig.json; a case runs once for each value a header lists.
+const headerOptions = ['declaration', 'module', 'noEmit'];
 if (existsSync(compilerCases))
   for (const name of readdirSync(compilerCases).sort()) {
-    if (!name.startsWith('contentMapper') || omittedMapperCases.includes(name)) continue;
+    if (!name.startsWith('contentMapper')) continue;
     const parsed = parseTestCase(readFileSync(join(compilerCases, name), 'utf8'), name);
     const files = {};
-    for (const file of parsed.files) files[file.name.slice(1)] = file.content;
+    for (const file of parsed.files) {
+      // The cases write below the root directory, which is the project's directory here.
+      files[file.name.slice(1)] =
+        file.name === '/tsconfig.json'
+          ? file.content.replace(/"(rootDir|outDir)": "\/([^"]*)"/g, '"$1": "./$2"')
+          : file.content;
+    }
     for (const [link, target] of Object.entries(parsed.symlinks))
       files[link.slice(1)] = { link: relative(dirname(link), target) };
-    mapperProjects.push([`content mapper case ${name}`, files, ['--runExternalCode', '--noEmit']]);
+    let runs = [['--runExternalCode']];
+    for (const option of headerOptions) {
+      const values = parsed.options[option.toLowerCase()];
+      if (values === undefined) continue;
+      runs = runs.flatMap((args) => values.split(',').map((value) => [...args, `--${option}`, value.trim()]));
+    }
+    for (const args of runs)
+      mapperProjects.push([`content mapper case ${[name, ...args.slice(1)].join(' ')}`, files, args]);
   }
 
 const mapperPackage = (exec) =>
@@ -1417,6 +1522,130 @@ mapperProjects.push(
         'export const suppressed: string = 5;',
         '// @ts-expect-error',
         'export const unused = 6;',
+        '',
+      ].join('\n'),
+    },
+    ['--runExternalCode'],
+  ],
+  [
+    // The declarations of a supplemental file go beside those of its canonical file, which refer to them, and
+    // their map leads to the text the mapper read, under the canonical file's name.
+    'declarations of supplemental files in a declaration directory',
+    {
+      'tsconfig.json': JSON.stringify({
+        compilerOptions: {
+          strict: true,
+          module: 'esnext',
+          moduleResolution: 'bundler',
+          declaration: true,
+          declarationMap: true,
+          rootDir: 'src',
+          outDir: 'out',
+          declarationDir: 'types',
+          types: [],
+        },
+        contentMappers: [{ package: 'mapper', extensions: ['.astro'] }],
+      }),
+      'node_modules/mapper/package.json': mapperPackage('supplemental-mapper'),
+      'src/parts/component.astro': 'export const value = 1;\nexport interface Props {\n  title: string;\n}\n',
+      'src/main.ts': 'import "./parts/component.astro";\nexport const main = 1;\n',
+    },
+    ['--runExternalCode'],
+  ],
+  [
+    // CommonJS output names a mapped file by the extension of its output, also in a `require` that TypeScript
+    // writes and in the helper call that rewrites a path at run time, which keeps `.jsx` here. An extension
+    // that a mapper keeps for its outputs is not rewritten.
+    'import paths of content mapped files in CommonJS output',
+    {
+      'tsconfig.json': JSON.stringify({
+        compilerOptions: {
+          target: 'esnext',
+          module: 'commonjs',
+          moduleResolution: 'bundler',
+          jsx: 'preserve',
+          strict: true,
+          rewriteRelativeImportExtensions: true,
+          allowJs: true,
+          checkJs: true,
+          declaration: true,
+          outDir: 'out',
+          types: [],
+        },
+        contentMappers: [
+          {
+            package: 'mapper',
+            extensions: ['.box', '.kept.box'],
+            outputExtensions: { '.box': '.js', '.kept.box': '.kept.box' },
+          },
+        ],
+      }),
+      'node_modules/mapper/package.json': mapperPackage('compiler-test-mapper'),
+      'card.box': 'export const card = 1;\n',
+      'card.kept.box': 'export const kept = 2;\n',
+      'main.ts':
+        'import card = require("./card.box");\nexport * from "./card.box";\n' +
+        'export { kept } from "./card.kept.box";\nexport const one = card.card;\n' +
+        'export function load(path: string) {\n  return import(path);\n}\n' +
+        'export const later = import("./card.box");\n',
+      'required.js':
+        '/** @param {string} path */\nexport function load(path) {\n  return require(path);\n}\n' +
+        'export const card = require("./card.box");\n',
+      'globals.d.ts': 'declare function require(path: string): unknown;\n',
+    },
+    ['--runExternalCode'],
+  ],
+  [
+    // The output a mapper names for a file whose declarations are emitted is an output like the others: here
+    // another file writes it, and the declarations of both have one name.
+    'an output of a content mapper that another file writes, with declarations',
+    {
+      'tsconfig.json': JSON.stringify({
+        compilerOptions: {
+          module: 'preserve',
+          rewriteRelativeImportExtensions: true,
+          declaration: true,
+          outDir: 'dist',
+          types: [],
+        },
+        contentMappers: [{ package: 'mapper', extensions: ['.astro'], outputExtensions: { '.astro': '.js' } }],
+      }),
+      'node_modules/mapper/package.json': mapperPackage('compiler-test-mapper'),
+      'component.astro': 'export const fromAstro = true;\n',
+      'component.ts': 'export const fromTs = true;\n',
+    },
+    ['--runExternalCode'],
+  ],
+  [
+    // In a declaration map, text the mapper wrote has no source position, also where a position in copied
+    // text follows at the same place of the output: after a type the mapper wrote, the end of a declaration
+    // whose initializer is left out.
+    'declaration maps where text a content mapper wrote meets text it copied',
+    {
+      'tsconfig.json': JSON.stringify({
+        compilerOptions: {
+          target: 'es2020',
+          module: 'esnext',
+          moduleResolution: 'bundler',
+          strict: true,
+          declaration: true,
+          declarationMap: true,
+          types: [],
+        },
+        contentMappers: [{ package: 'mapper', extensions: ['.box'] }],
+      }),
+      'node_modules/mapper/package.json': JSON.stringify({
+        name: 'mapper',
+        version: '1.0.0',
+        typescript: { contentMapper: { exec: ['compiler-test-mapper'], compilerOptions: ['target'] } },
+      }),
+      'values.box': [
+        'export const typed: #{target} = 7;',
+        'export let either: #{target} | string = "x";',
+        'export function list(first: #{target}): #{target}[] {',
+        '  return [first];',
+        '}',
+        'export const inferred = #{target};',
         '',
       ].join('\n'),
     },
@@ -1474,7 +1703,9 @@ function run(command, files, args) {
       { cwd, env, encoding: 'utf8', maxBuffer: 1 << 26 },
       (error, stdout, stderr) => {
         const status = error ? (typeof error.code === 'number' ? error.code : -1) : 0;
-        done({ stdout, stderr, status, outputs: readOutputs(cwd, cwd, files) });
+        // A diagnostic may name a file by its absolute name, and each compiler has a directory of its own.
+        const local = (text) => text.replaceAll(cwd, '');
+        done({ stdout: local(stdout), stderr: local(stderr), status, outputs: readOutputs(cwd, cwd, files) });
       },
     );
   });

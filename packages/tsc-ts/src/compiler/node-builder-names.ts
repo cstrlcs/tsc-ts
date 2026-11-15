@@ -56,7 +56,13 @@ import { getTypeOfSymbol } from './checker-symbol-types.js';
 import { compareSymbols, isEmptyObjectType } from './checker-type-factory.js';
 import { TypeFlags, type LiteralType, type Type } from './checker-types.js';
 import { isLateBoundName } from './checker-utilities.js';
-import { isExternalModuleNameRelative, pathIsRelative } from './path.js';
+import {
+  type ExtensionRewrite,
+  isExternalModuleNameRelative,
+  pathIsRelative,
+  rewriteExtension,
+  shouldRewriteExtension,
+} from './path.js';
 import type { Checker } from './checker.js';
 import type { ResolvedModule } from './module-resolution-types.js';
 import {
@@ -987,19 +993,41 @@ export function getSpecifierForModuleSymbol(
   return moduleSpecifierResultForSymbol(b, result, originalImportAttributesType, symbol);
 }
 
-/** `result` with `importAttributesType`, if its specifier resolves to `symbol` with those attributes. */
+/**
+ * `result` with `importAttributesType`, if its specifier resolves to `symbol` with those attributes, and with
+ * its specifier as `rewriteContentMappedModuleSpecifier` writes it.
+ */
 function moduleSpecifierResultForSymbol(
   b: NodeBuilder,
   result: ModuleSpecifierResult,
   importAttributesType: Type | undefined,
   symbol: Symbol,
 ): ModuleSpecifierResult {
+  let attributesType = result.importAttributesType;
   if (
     importAttributesType !== undefined &&
     moduleSpecifierResolvesToSymbol(b, result.specifier, importAttributesType, symbol)
   )
-    return new ModuleSpecifierResult(result.specifier, importAttributesType);
-  return result;
+    attributesType = importAttributesType;
+  const specifier = rewriteContentMappedModuleSpecifier(b, result.specifier);
+  if (specifier === result.specifier && attributesType === result.importAttributesType) return result;
+  return new ModuleSpecifierResult(specifier, attributesType);
+}
+
+/**
+ * Where declarations are written with `rewriteRelativeImportExtensions`, the specifier of a content mapper's
+ * file with the extension of the file's output, whose declarations it then names.
+ */
+function rewriteContentMappedModuleSpecifier(b: NodeBuilder, specifier: string): string {
+  if (
+    (b.internalFlags & NodeBuilderInternalFlags.RewriteModuleSpecifiers) === 0 ||
+    b.c.compilerOptions.rewriteRelativeImportExtensions !== true
+  )
+    return specifier;
+  const host = getModuleSpecifierHost(b.c).getOutputPathsHost();
+  const rewrites = host.contentMapperExtensionRewrites();
+  if (!shouldRewriteExtension(specifier, rewrites, host.useCaseSensitiveFileNames)) return specifier;
+  return rewriteExtension(specifier, rewrites, host.useCaseSensitiveFileNames) ?? specifier;
 }
 
 function moduleSpecifierResolvesToSymbol(
@@ -1060,7 +1088,8 @@ function getModuleSpecifiersWithAmbientModule(
   return new ModuleSpecifiers(specifiers, undefined);
 }
 
-function getModuleSpecifierHost(c: Checker): ModuleSpecifierHost {
+/** What module specifier generation asks the program of `c`, or the files of `c` alone without a program. */
+export function getModuleSpecifierHost(c: Checker): ModuleSpecifierHost {
   let host = c.host.getModuleSpecifierHost();
   if (host === undefined) {
     host = c.fallbackModuleSpecifierHost;
@@ -1231,6 +1260,14 @@ class FallbackOutputPathsHost implements OutputPathsHost {
 
   commonSourceDirectory(): string {
     return '';
+  }
+
+  contentMapperExtensions(): readonly string[] {
+    return [];
+  }
+
+  contentMapperExtensionRewrites(): readonly ExtensionRewrite[] {
+    return [];
   }
 }
 

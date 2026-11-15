@@ -341,6 +341,42 @@ test('checkers starting from merged globals report the merge diagnostics and nev
   for (const code of ['2451', '2397', '2664']) assert.ok(codes.includes(code), `no TS${code}`);
 });
 
+// How `rewriteRelativeImportExtensions` rewrites import paths, which emit and the checker ask, and where the
+// outputs of a referenced project lie, which the checker asks of a path into it, are computed before the program
+// is shared: here nothing else computes them first, since no declarations are emitted and the referenced project
+// has no output directory.
+test('import path rewrites never write to a bound, prepared program', () => {
+  const dir = tempDir('tsc-ts-immutability-rewrites-');
+  const files = {
+    'lib/tsconfig.json': JSON.stringify({ compilerOptions: { composite: true, types: [] }, files: ['index.ts'] }),
+    'lib/index.ts': 'export const lib = 1;\n',
+    'lib/index.d.ts': 'export declare const lib = 1;\n',
+    'app/tsconfig.json': JSON.stringify({
+      compilerOptions: {
+        strict: true,
+        module: 'esnext',
+        moduleResolution: 'bundler',
+        rewriteRelativeImportExtensions: true,
+        outDir: 'out',
+        types: [],
+      },
+      files: ['main.ts'],
+      references: [{ path: '../lib' }],
+    }),
+    'app/main.ts':
+      'import { lib } from "../lib/index.ts";\nimport { other } from "./other.ts";\nexport const all = [lib, other];\n',
+    'app/other.ts': 'export const other = 2;\n',
+  };
+  for (const [name, text] of Object.entries(files)) {
+    mkdirSync(dirname(join(dir, name)), { recursive: true });
+    writeFileSync(join(dir, name), text);
+  }
+  const plain = assertImmutable(['-p', join(dir, 'app')], 500);
+  // The path into the referenced project, whose outputs lie beside its sources and not below `out`.
+  assert.match(plain.diagnostics.join('\n'), /main\.ts\(\d+,\d+\) \d+:\d+ TS2878: /);
+  assert.match(plain.outputs.join('\n'), /from "\.\/other\.js"/);
+});
+
 // A file a content mapper produced keeps its original text and its span map, by which its diagnostics are
 // shown, and may come with supplemental virtual files; the mappers that ran are closed and gone from the
 // program's host once it is loaded. The mappers are those of TypeScript's test cases, as processes.

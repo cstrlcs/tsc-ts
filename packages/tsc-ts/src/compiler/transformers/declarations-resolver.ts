@@ -102,6 +102,8 @@ export const enum NodeBuilderInternalFlags {
   NoSyntacticPrinter = 1 << 1,
   DoNotIncludeSymbolChain = 1 << 2,
   AllowUnresolvedNames = 1 << 3,
+  /** Write the specifier of a content mapper's file with the extension of the file's output. */
+  RewriteModuleSpecifiers = 1 << 4,
 }
 
 /**

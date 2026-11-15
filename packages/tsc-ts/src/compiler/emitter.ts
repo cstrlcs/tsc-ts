@@ -1,11 +1,20 @@
 // Emits JavaScript and declarations for source files: runs the transforms, prints, and writes
 // the output, source map and `//# sourceMappingURL` comment.
-import { ScriptKind, type SourceFile } from './ast.js';
+import { FileReference, ScriptKind, type SourceFile } from './ast.js';
 import { compareDiagnostics, equalDiagnostics, type Diagnostic } from './diagnostics.js';
-import { type CompilerOptions, JsxEmit, NewLineKind, getEmitScriptTarget, getIsolatedModules } from './options.js';
+import {
+  type CompilerOptions,
+  JsxEmit,
+  ModuleKind,
+  NewLineKind,
+  getEmitDeclarations,
+  getEmitScriptTarget,
+  getIsolatedModules,
+} from './options.js';
 import { LanguageVariant } from './types.js';
 import { type OutputPathsHost, getOutputPathsFor } from './output-paths.js';
 import {
+  type ExtensionRewrite,
   combinePaths,
   fileExtensionIs,
   getBaseFileName,
@@ -16,9 +25,10 @@ import {
   ensureTrailingDirectorySeparator,
   containsPath,
   getNormalizedAbsolutePath,
+  getRelativePathFromFile,
 } from './path.js';
 import { EmitContext } from './printer/emit-context.js';
-import { Printer, PrinterOptions } from './printer/printer.js';
+import { OriginalSourceMapSource, Printer, PrinterOptions } from './printer/printer.js';
 import { TextWriter } from './printer/text-writer.js';
 import { SourceMapGenerator, getRelativePathToDirectoryOrUrl } from './sourcemap.js';
 import { DeclarationEmitResolver } from './transformers/declarations-resolver.js';
@@ -26,6 +36,7 @@ import { DeclarationTransformer } from './transformers/declarations.js';
 import type { EmitResolver } from './transformers/emit-resolver.js';
 import { ImportElision } from './transformers/import-elision.js';
 import { type ModuleFormatHost, UseStrictTransformer, createModuleTransformer } from './transformers/module.js';
+import { ImportExtensionRewrites } from './transformers/module-utilities.js';
 import type { Transformer } from './transformers/transformer.js';
 import { TypeEraser } from './transformers/type-eraser.js';
 import { TypeScriptFacts } from './transformers/subtree-facts.js';
@@ -66,6 +77,12 @@ export abstract class EmitHost implements OutputPathsHost {
   commonSourceDirectory(): string {
     return this.commonSourceDirectoryPath;
   }
+
+  /** The extensions of the files content mappers produce (`Program.contentMapperExtensions`). */
+  abstract contentMapperExtensions(): readonly string[];
+
+  /** The extensions the outputs of those files have (`Program.contentMapperExtensionRewrites`). */
+  abstract contentMapperExtensionRewrites(): readonly ExtensionRewrite[];
 
   /**
    * Writes an output file; returns an error message, or `''`. `declarationDiagnostics` are the
@@ -127,8 +144,13 @@ export class EmitResult {
   }
 }
 
-export function sourceFileMayBeEmitted(file: SourceFile, options: CompilerOptions): boolean {
+/**
+ * Whether emit writes outputs for `file`. A content mapper or its build tool writes what runs for a file the
+ * mapper produced, so emit has only its declarations to write, where it writes declarations.
+ */
+export function sourceFileMayBeEmitted(file: SourceFile, options: CompilerOptions, forceDtsEmit = false): boolean {
   if (file.isDeclarationFile) return false;
+  if (file.contentMapper() !== '' && !forceDtsEmit && !getEmitDeclarations(options)) return false;
   if (file.scriptKind === ScriptKind.JSON) return options.outDir !== undefined && options.outDir !== '';
   return true;
 }
@@ -161,8 +183,8 @@ export function emitFiles(host: EmitHost, files: readonly SourceFile[], emitOnly
   }
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
-    if (!sourceFileMayBeEmitted(file, options) || host.isSourceFileFromExternalLibrary(file)) continue;
-    const paths = getOutputPathsFor(file.fileName, file.scriptKind === ScriptKind.JSON, options, host, forced);
+    if (!sourceFileMayBeEmitted(file, options, forced) || host.isSourceFileFromExternalLibrary(file)) continue;
+    const paths = getOutputPathsFor(file, options, host, forced);
     // As in tsgo, a file's JavaScript and declarations share one emit context: emit flags that JavaScript
     // transforms set on the file's own nodes, such as a decorated parameter's name, also apply to its declarations.
     const context = new EmitContext();
@@ -215,6 +237,8 @@ function emitDeclarationFile(
   const options = host.options;
   const transformer = new DeclarationTransformer(context, host, options, resolver, declarationFilePath);
   const transformed = transformer.transformSourceFile(file);
+  const supplemental = supplementalReferences(host, file, declarationFilePath, forced);
+  if (supplemental.length > 0) transformed.referencedFiles = transformed.referencedFiles.concat(supplemental);
   result.declarationTransformed = true;
   const diagnostics = transformer.diagnostics;
   for (let i = 0; i < diagnostics.length; i++) result.diagnostics.push(diagnostics[i]);
@@ -231,7 +255,15 @@ function emitDeclarationFile(
   printerOptions.sourceMap = declarationMap;
   printerOptions.onlyPrintJSDocStyle = true;
   printerOptions.omitBraceSourceMapPositions = true;
-  const printer = new Printer(printerOptions, context);
+  // The declaration map of a file a content mapper produced leads to the text the mapper read.
+  const spanMap = file.spanMap();
+  const printer = new Printer(
+    printerOptions,
+    context,
+    declarationMap && spanMap !== undefined
+      ? new OriginalSourceMapSource(file.originalFileName(), file.originalText(), spanMap)
+      : undefined,
+  );
   const emitSourceMaps = declarationMap && !fileExtensionIs(file.fileName, '.json');
   return printSourceFile(
     host,
@@ -244,6 +276,43 @@ function emitDeclarationFile(
     result,
     emitterDiagnostics(diagnostics),
   );
+}
+
+/**
+ * A `/// <reference path>` from the declarations of a content mapper's canonical file to the declarations emitted
+ * for each of its supplemental files, so that a project that loads the former loads the types of the latter.
+ */
+function supplementalReferences(
+  host: EmitHost,
+  file: SourceFile,
+  declarationFilePath: string,
+  forced: boolean,
+): FileReference[] {
+  const references: FileReference[] = [];
+  for (const supplemental of file.supplementalSourceFiles()) {
+    if (
+      !sourceFileMayBeEmitted(supplemental, host.options, forced) ||
+      host.isSourceFileFromExternalLibrary(supplemental)
+    )
+      continue;
+    const declarationPath = getOutputPathsFor(supplemental, host.options, host, forced).declarationFilePath;
+    if (declarationPath === '') continue;
+    references.push(
+      new FileReference(
+        -1,
+        -1,
+        getRelativePathFromFile(
+          declarationFilePath,
+          declarationPath,
+          host.useCaseSensitiveFileNames,
+          host.currentDirectory,
+        ),
+        ModuleKind.None,
+        false,
+      ),
+    );
+  }
+  return references;
 }
 
 /**
@@ -285,7 +354,15 @@ function getScriptTransformers(host: EmitHost, context: EmitContext, file: Sourc
     transformers.push(new JsxTransformer(context, options, syntax, host.resolver));
   addDownlevelTransformers(transformers, context, options, syntax, host.resolver);
   transformers.push(new UseStrictTransformer(context, options, host.formats));
-  transformers.push(createModuleTransformer(context, options, host.resolver, host.formats));
+  transformers.push(
+    createModuleTransformer(
+      context,
+      options,
+      host.resolver,
+      host.formats,
+      new ImportExtensionRewrites(host.contentMapperExtensionRewrites(), host.useCaseSensitiveFileNames),
+    ),
+  );
   if (!getIsolatedModules(options)) transformers.push(new ConstEnumInliner(context, options, host.resolver));
   return transformers;
 }

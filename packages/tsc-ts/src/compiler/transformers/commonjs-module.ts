@@ -104,7 +104,11 @@ import type { ModuleFormatHost } from './module.js';
 import { Transformer } from './transformer.js';
 import { hasSyntacticModifier, isExternalModule, isIdentifierReference, singleOrMany } from './utilities.js';
 import { VisitorBase } from './visitor-base.js';
-import { createRequireCallArguments, rewriteModuleSpecifier } from './module-utilities.js';
+import {
+  type ImportExtensionRewrites,
+  createRequireCallArguments,
+  rewriteModuleSpecifier,
+} from './module-utilities.js';
 
 const exportDefault = ModifierFlags.Export | ModifierFlags.Default;
 const supportedJSExtensions = ['.js', '.jsx', '.mjs', '.cjs'];
@@ -152,6 +156,7 @@ export class CommonJSModuleTransformer extends Transformer {
   readonly options: CompilerOptions;
   readonly resolver: EmitResolver;
   readonly formats: ModuleFormatHost;
+  readonly extensions: ImportExtensionRewrites;
   readonly moduleKind: ModuleKind;
   readonly languageVersion: ScriptTarget;
   private readonly topLevel: ModeVisitor;
@@ -163,11 +168,18 @@ export class CommonJSModuleTransformer extends Transformer {
   private parentNode: Node | undefined;
   private currentNode: Node | undefined;
 
-  constructor(context: EmitContext, options: CompilerOptions, resolver: EmitResolver, formats: ModuleFormatHost) {
+  constructor(
+    context: EmitContext,
+    options: CompilerOptions,
+    resolver: EmitResolver,
+    formats: ModuleFormatHost,
+    extensions: ImportExtensionRewrites,
+  ) {
     super(context);
     this.options = options;
     this.resolver = resolver;
     this.formats = formats;
+    this.extensions = extensions;
     this.moduleKind = getEmitModuleKind(options);
     this.languageVersion = getEmitScriptTarget(options);
     this.topLevel = new ModeVisitor(this, VisitMode.TopLevel);
@@ -673,7 +685,7 @@ export class CommonJSModuleTransformer extends Transformer {
     const factory = this.factory;
     return factory.createCallExpression(
       factory.createIdentifier('require'),
-      createRequireCallArguments(this.context, node, this.options),
+      createRequireCallArguments(this.context, node, this.options, this.extensions),
     );
   }
 
@@ -1287,8 +1299,13 @@ export class CommonJSModuleTransformer extends Transformer {
     else if (first !== undefined && rewrite)
       argument =
         first instanceof StringLiteral
-          ? rewriteModuleSpecifier(this.context, first, this.options)
-          : factory.createRewriteRelativeImportExtensionsHelper(first, this.options.jsx === JsxEmit.Preserve);
+          ? rewriteModuleSpecifier(this.context, first, this.options, this.extensions)
+          : factory.createRewriteRelativeImportExtensionsHelper(
+              first,
+              this.options.jsx === JsxEmit.Preserve,
+              this.extensions.rewrites,
+              !this.extensions.useCaseSensitiveFileNames,
+            );
     else argument = first;
     return this.createImportCallExpressionCommonJS(argument);
   }
@@ -1338,8 +1355,13 @@ export class CommonJSModuleTransformer extends Transformer {
       const first = this.visitNode(nodes[0])!;
       const rewritten =
         first instanceof StringLiteral || first.kind === SyntaxKind.NoSubstitutionTemplateLiteral
-          ? rewriteModuleSpecifier(this.context, first, this.options)
-          : factory.createRewriteRelativeImportExtensionsHelper(first, this.options.jsx === JsxEmit.Preserve);
+          ? rewriteModuleSpecifier(this.context, first, this.options, this.extensions)
+          : factory.createRewriteRelativeImportExtensionsHelper(
+              first,
+              this.options.jsx === JsxEmit.Preserve,
+              this.extensions.rewrites,
+              !this.extensions.useCaseSensitiveFileNames,
+            );
       const rest = nodes.slice(1);
       const visitedRest = this.visitArray(rest);
       if (rewritten !== nodes[0] || visitedRest !== rest)

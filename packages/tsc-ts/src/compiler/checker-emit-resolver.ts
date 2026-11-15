@@ -118,7 +118,8 @@ import { TokenFlags } from './types.js';
 import { getSignatureOfFullSignatureType } from './checker-jsdoc.js';
 import { CheckFlags, declarationCount, getDeclarations, type Symbol, SymbolFlags } from './symbol.js';
 
-const declarationEmitInternalFlags = NodeBuilderInternalFlags.AllowUnresolvedNames;
+const declarationEmitInternalFlags =
+  NodeBuilderInternalFlags.AllowUnresolvedNames | NodeBuilderInternalFlags.RewriteModuleSpecifiers;
 const aliasMeaning = SymbolFlags.Value | SymbolFlags.Type | SymbolFlags.Namespace | SymbolFlags.Alias;
 
 export class CheckerDeclarationEmitResolver extends DeclarationEmitResolver {

@@ -74,7 +74,6 @@ import {
   PropertySignatureDeclaration,
   JSDoc,
   JSDocText,
-  ScriptKind,
   SetAccessorDeclaration,
   SourceFile,
   StringLiteral,
@@ -131,7 +130,7 @@ import {
 import { type Diagnostic, Diagnostics } from '../diagnostics.js';
 import type { CompilerOptions } from '../options.js';
 import { type OutputPathsHost, getOutputPathsFor } from '../output-paths.js';
-import { getDirectoryPath, normalizeSlashes } from '../path.js';
+import { getDirectoryPath, normalizeSlashes, rewriteExtension, shouldRewriteExtension } from '../path.js';
 import type { EmitContext } from '../printer/emit-context.js';
 import { EmitFlags, GeneratedIdentifierFlags } from '../printer/emit-flags.js';
 import { isModifier } from '../printer/utilities.js';
@@ -402,13 +401,7 @@ export class DeclarationTransformer extends Transformer {
       let fileName = target.fileName;
       if (!target.isDeclarationFile) {
         // The referenced file's declaration output, else its JavaScript output.
-        const paths = getOutputPathsFor(
-          target.fileName,
-          target.scriptKind === ScriptKind.JSON,
-          this.options,
-          this.host,
-          true,
-        );
+        const paths = getOutputPathsFor(target, this.options, this.host, true);
         fileName = paths.declarationFilePath !== '' ? paths.declarationFilePath : paths.jsFilePath;
         if (fileName === '') fileName = target.fileName;
       }
@@ -1280,11 +1273,24 @@ export class DeclarationTransformer extends Transformer {
     return this.factory.createIdentifier(text);
   }
 
+  /**
+   * The module specifier `input` as declarations write it: with `rewriteRelativeImportExtensions`, the extension
+   * of a content mapper's file becomes the one of its output, whose declarations the specifier then names.
+   */
   private rewriteModuleSpecifier(parent: Node, input: Node | undefined): Node | undefined {
     if (input === undefined) return undefined;
     if (parent.kind !== SyntaxKind.ModuleDeclaration && parent.kind !== SyntaxKind.ImportType)
       this.resultHasExternalModuleIndicator = true;
-    return input;
+    if (!(input instanceof StringLiteral) || this.options.rewriteRelativeImportExtensions !== true) return input;
+    const rewrites = this.host.contentMapperExtensionRewrites();
+    const useCaseSensitiveFileNames = this.host.useCaseSensitiveFileNames;
+    if (!shouldRewriteExtension(input.text, rewrites, useCaseSensitiveFileNames)) return input;
+    const rewritten = rewriteExtension(input.text, rewrites, useCaseSensitiveFileNames);
+    if (rewritten === undefined) return input;
+    const result = this.factory.createStringLiteral(rewritten, input.tokenFlags);
+    this.context.setOriginal(result, input);
+    this.context.assignCommentAndSourceMapRanges(result, input);
+    return result;
   }
 
   /** The replacement statements for a direct child of a source file or module block. */

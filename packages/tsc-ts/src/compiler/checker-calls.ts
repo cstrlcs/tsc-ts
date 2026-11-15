@@ -33,8 +33,11 @@ import {
   getEffectiveCheckNode,
   isFunctionLikeDeclarationKind,
   isImportCall,
+  isRequireCall,
+  isStringLiteralLike,
   nodeIsPresent,
 } from './ast-utilities.js';
+import { ExternalEmitHelpers, checkExternalEmitHelpers } from './checker-emit-helpers.js';
 import {
   getContainingClass,
   getSourceFileOfNode,
@@ -237,6 +240,13 @@ export function checkCallExpression(c: Checker, node: Node, checkMode: CheckMode
   const call = node as CallExpression;
   const callee = call.expression;
   if (isImportCall(node)) return checkImportCallExpression(c, node);
+  if (
+    c.compilerOptions.rewriteRelativeImportExtensions === true &&
+    isInJSFile(node) &&
+    isRequireCall(node, false) &&
+    !isStringLiteralLike(call.arguments.nodes[0]!)
+  )
+    checkExternalEmitHelpers(c, node, ExternalEmitHelpers.RewriteRelativeImportExtension);
   const signature = getResolvedSignature(c, node, checkMode);
   // A deferred call to a generic function returning a function, under SkipGenericFunctions.
   if (signature === c.resolvingSignature) return c.silentNeverType;

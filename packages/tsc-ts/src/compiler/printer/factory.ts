@@ -50,6 +50,7 @@ import {
 } from '../ast.js';
 import { modifierToFlag } from '../ast-utilities.js';
 import { getNameOfDeclaration, getNonAssignedNameOfDeclaration, hasSyntacticModifier } from '../binder-utilities.js';
+import type { ExtensionRewrite } from '../path.js';
 import { SyntaxKind } from '../syntax-kind.js';
 import { TokenFlags } from '../types.js';
 import type { EmitContext } from './emit-context.js';
@@ -511,11 +512,39 @@ export abstract class NodeFactory extends NodeFactoryBase {
     ]);
   }
 
-  /** `__rewriteRelativeImportExtension(argument)`, with `true` to keep `.jsx`. */
-  createRewriteRelativeImportExtensionsHelper(argument: Node, preserveJsx: boolean): CallExpression {
+  /**
+   * `__rewriteRelativeImportExtension(argument)`, with `true` to keep `.jsx`. With `extraExtensions`, the
+   * extensions of the files content mappers produce and of their outputs follow as an object, and `true` to
+   * compare them in any letter case.
+   */
+  createRewriteRelativeImportExtensionsHelper(
+    argument: Node,
+    preserveJsx: boolean,
+    extraExtensions: readonly ExtensionRewrite[],
+    ignoreCase: boolean,
+  ): CallExpression {
     this.context.requestEmitHelper(rewriteRelativeImportExtensionsHelper);
-    const args = preserveJsx ? [argument, this.createToken(SyntaxKind.TrueKeyword) as Node] : [argument];
-    return this.createCallExpression(this.createUnscopedHelperName('__rewriteRelativeImportExtension'), args);
+    const helperName = this.createUnscopedHelperName('__rewriteRelativeImportExtension');
+    if (extraExtensions.length === 0)
+      return this.createCallExpression(
+        helperName,
+        preserveJsx ? [argument, this.createToken(SyntaxKind.TrueKeyword)] : [argument],
+      );
+    const properties: Node[] = [];
+    for (const extension of extraExtensions)
+      properties.push(
+        this.createPropertyAssignment(
+          this.createStringLiteral(extension.source, TokenFlags.None),
+          this.createStringLiteral(extension.target, TokenFlags.None),
+        ),
+      );
+    const args: Node[] = [
+      argument,
+      this.createToken(preserveJsx ? SyntaxKind.TrueKeyword : SyntaxKind.FalseKeyword),
+      this.createObjectLiteral(properties, false),
+    ];
+    if (ignoreCase) args.push(this.createToken(SyntaxKind.TrueKeyword));
+    return this.createCallExpression(helperName, args);
   }
 
   isCallToHelper(node: Node, helperName: string): boolean {

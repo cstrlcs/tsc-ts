@@ -176,6 +176,7 @@ import { ScriptTarget } from '../options.js';
 import { fileExtensionIs } from '../path.js';
 import { CharacterCodes, isWhiteSpaceLike } from '../character-codes.js';
 import type { SourceMapGenerator } from '../sourcemap.js';
+import type { SpanMap } from '../span-map.js';
 import { EmitContext, compareEmitHelpers, type SynthesizedComment } from './emit-context.js';
 import { EmitFlags, GeneratedIdentifierFlags } from './emit-flags.js';
 import { NameGenerator, NameGeneratorHost, isFileLevelUniqueName } from './name-generator.js';
@@ -251,6 +252,23 @@ export class PrinterOptions {
     this.neverAsciiEscape = false;
     this.preserveSourceNewlines = false;
     this.terminateUnterminatedLiterals = false;
+  }
+}
+
+/**
+ * The text a content mapper read for a file, as the source of the source map of the file's declarations: a
+ * position in text the mapper copied is recorded at its place in this text, under this name, and any other
+ * position is recorded without a source position.
+ */
+export class OriginalSourceMapSource {
+  readonly lineStarts: readonly number[];
+
+  constructor(
+    readonly fileName: string,
+    text: string,
+    readonly spanMap: SpanMap,
+  ) {
+    this.lineStarts = computeLineStarts(text);
   }
 }
 
@@ -469,6 +487,10 @@ export class Printer extends NameGeneratorHost {
   private sourceMapLine: number;
   private mostRecentSourceMapSource: SourceFile | undefined;
   private mostRecentSourceMapSourceIndex: number;
+  /** Where the source map positions of the file printed are recorded instead of in the file's own text, if set. */
+  private readonly originalSource: OriginalSourceMapSource | undefined;
+  /** The index of `originalSource` in the source map being written, or -1 until a position is recorded in it. */
+  private originalSourceIndex: number;
 
   get nameGenerator(): NameGenerator {
     let generator = this.nameGeneratorStore;
@@ -479,7 +501,11 @@ export class Printer extends NameGeneratorHost {
     return generator;
   }
 
-  constructor(options: PrinterOptions, context: EmitContext | undefined) {
+  constructor(
+    options: PrinterOptions,
+    context: EmitContext | undefined,
+    originalSource: OriginalSourceMapSource | undefined = undefined,
+  ) {
     super();
     this.options = options;
     this.context = context === undefined ? new EmitContext() : context;
@@ -518,6 +544,8 @@ export class Printer extends NameGeneratorHost {
     this.sourceMapLine = 0;
     this.mostRecentSourceMapSource = undefined;
     this.mostRecentSourceMapSourceIndex = -1;
+    this.originalSource = originalSource;
+    this.originalSourceIndex = -1;
   }
 
   // Entry points
@@ -579,9 +607,11 @@ export class Printer extends NameGeneratorHost {
     const savedSource = this.sourceMapSource;
     const savedSourceIndex = this.sourceMapSourceIndex;
     const savedSourceLineStarts = this.sourceMapLineStarts;
+    const savedOriginalSourceIndex = this.originalSourceIndex;
 
     this.sourceMapsDisabled = sourceMapGenerator === undefined;
     this.sourceMapGenerator = sourceMapGenerator;
+    this.originalSourceIndex = -1;
     this.sourceMapSource = undefined;
     this.sourceMapSourceIndex = -1;
     this.sourceMapLineStarts = [];
@@ -601,6 +631,7 @@ export class Printer extends NameGeneratorHost {
     this.sourceMapSourceIndex = savedSourceIndex;
     this.sourceMapLineStarts = savedSourceLineStarts;
     this.sourceMapLine = 0;
+    this.originalSourceIndex = savedOriginalSourceIndex;
     return true;
   }
 
@@ -4936,6 +4967,20 @@ export class Printer extends NameGeneratorHost {
       pos < 0
     )
       return false;
+    const original = this.originalSource;
+    if (original !== undefined) {
+      const mapped = original.spanMap.virtualToOriginalPositionExact(pos);
+      if (mapped === undefined) return generator.addGeneratedMapping(this.writer.getLine(), this.writer.getColumn());
+      if (this.originalSourceIndex < 0) this.originalSourceIndex = generator.addSource(original.fileName);
+      const originalLine = computeLineOfPosition(original.lineStarts, mapped);
+      return generator.addSourceMapping(
+        this.writer.getLine(),
+        this.writer.getColumn(),
+        this.originalSourceIndex,
+        originalLine,
+        mapped - (original.lineStarts[originalLine] | 0),
+      );
+    }
     const lineStarts = this.sourceMapLineStarts;
     const line = this.sourceMapLineOf(pos);
     return generator.addSourceMapping(

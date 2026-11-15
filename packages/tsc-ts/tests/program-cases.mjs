@@ -1113,16 +1113,7 @@ function optionValue(declaration, raw) {
  * Runs of test cases that tsc-ts answers differently from tsgo: the cases, the argument their differing runs
  * have, and what the differences the test finds must match. The comment of each entry gives the reason.
  */
-const differingRuns = [
-  // The name a content mapper's `outputExtensions` gives the output of a mapped file is one of the output paths
-  // of mapped files, which tsc-ts does not compute yet: it does not report TS5056 where another file has that output.
-  {
-    name: /^compiler\/contentMapperOutputExtensionsCollision\.ts$/,
-    arg: '--listFilesOnly',
-    difference:
-      /^stdout line 1: tsgo "error TS5056: Cannot write file '\/dist\/component\.js' because it would be overwritten by multiple input files\.", ours "[^"]*"\nstatus tsgo 1, ours 0$/,
-  },
-];
+const differingRuns = [];
 
 /**
  * Projects from TypeScript's multi-file test cases. Cases with a tsconfig.json are run with it; others get one with

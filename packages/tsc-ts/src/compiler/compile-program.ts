@@ -6,6 +6,7 @@ import type { Node, SourceFile } from './ast.js';
 import type { Diagnostic } from './diagnostics.js';
 import { EmitHost, EmitOnly, EmitResult, emitFiles, skippedWrite, sourceFileMayBeEmitted } from './emitter.js';
 import { Resolver } from './module-resolution.js';
+import type { ExtensionRewrite } from './path.js';
 import { getEmitDeclarations, type CompilerOptions, type ModuleKind } from './options.js';
 import type { Program } from './program.js';
 import { CheckedProgram } from './program-checker.js';
@@ -163,6 +164,14 @@ class ProgramEmitHost extends EmitHost {
 
   isSourceFileFromExternalLibrary(file: SourceFile): boolean {
     return this.program.isSourceFileFromExternalLibrary(file);
+  }
+
+  contentMapperExtensions(): readonly string[] {
+    return this.program.contentMapperExtensions();
+  }
+
+  contentMapperExtensionRewrites(): readonly ExtensionRewrite[] {
+    return this.program.contentMapperExtensionRewrites();
   }
 
   writeFile(fileName: string, text: string, declarationDiagnostics?: readonly Diagnostic[]): string {
@@ -341,15 +350,13 @@ export class ProgramEmitter {
   emit(files: readonly SourceFile[], emitOnly: EmitOnly, writer: OutputWriter): EmitResult {
     // Where `emitFiles` would emit nothing, it is not given a host, whose resolvers index every file.
     const options = this.program.options;
-    if (
-      (options.noEmit === true && emitOnly !== EmitOnly.ForcedDts) ||
-      !files.some((file) => sourceFileMayBeEmitted(file, options))
-    ) {
+    const forced = emitOnly === EmitOnly.ForcedDts;
+    if ((options.noEmit === true && !forced) || !files.some((file) => sourceFileMayBeEmitted(file, options, forced))) {
       const result = new EmitResult();
-      result.emitSkipped = options.noEmit === true && emitOnly !== EmitOnly.ForcedDts;
+      result.emitSkipped = options.noEmit === true && !forced;
       return result;
     }
-    const host = this.getHost(emitOnly === EmitOnly.ForcedDts);
+    const host = this.getHost(forced);
     host.writer = writer;
     const result = emitFiles(host, files, emitOnly);
     host.writer = undefined;

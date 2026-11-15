@@ -87,6 +87,7 @@ import {
   ModuleKind,
   ModuleResolutionKind,
   getAllowImportingTsExtensions,
+  getEmitDeclarations,
   getEmitModuleKind,
   getModuleResolutionKind,
   getResolveJsonModule,
@@ -104,13 +105,20 @@ import {
   combinePaths,
   extensionIsTs,
   fileExtensionIsOneOf,
+  getAnyExtensionFromPath,
   getDeclarationFileExtension,
   getDirectoryPath,
+  getExtensionRewrite,
   getNormalizedAbsolutePath,
+  getRelativePathFromDirectory,
+  getRelativePathFromFile,
+  getRootLength,
   isDeclarationFileName,
   isExternalModuleNameRelative,
   pathIsRelative,
   removeExtension,
+  rewriteExtension,
+  shouldRewriteExtension,
   supportedTSExtensionsFlat,
   tryExtractTSExtension,
   tryGetExtensionFromPath,
@@ -166,6 +174,7 @@ import { isValidSpreadType } from './checker-destructuring.js';
 import { createPromiseType } from './checker-iteration.js';
 import { getInstantiationExpressionType } from './checker-calls.js';
 import { symbolToString, typeToString } from './type-printer.js';
+import { getModuleSpecifierHost } from './node-builder-names.js';
 import { checkTypeAssignableToAndOptionallyElaborate } from './checker-expressions.js';
 import { grammarErrorOnNode } from './checker-operators.js';
 import {
@@ -375,7 +384,7 @@ function resolveExternalModuleWorker(
       // A resolution error is reported even though the file was found.
       if (resolutionDiagnostic !== undefined)
         c.error(errorNode, resolutionDiagnostic, moduleReference, resolved!.resolvedFileName);
-      checkResolvedModuleExtension(c, location, moduleReference, resolved!, importingFile, mode, errorNode);
+      checkResolvedModuleExtension(c, location, moduleReference, resolved!, importingFile, file, mode, errorNode);
     }
     if (file.symbol !== undefined) {
       if (errorNode !== undefined) {
@@ -584,18 +593,22 @@ function resolutionExtensionIsTSOrJson(extension: string): boolean {
   return extensionIsTs(extension) || extension === '.json';
 }
 
-/** Imports that name a `.ts` file need `allowImportingTsExtensions`, and declaration files can't be imported. */
+/**
+ * Imports that name a `.ts` file need `allowImportingTsExtensions`, and declaration files can't be imported. With
+ * `rewriteRelativeImportExtensions`, the import must also be one emit rewrites to the file's output
+ * (`checkRewrittenImportExtension`).
+ */
 function checkResolvedModuleExtension(
   c: Checker,
   location: Node,
   moduleReference: string,
   resolved: ResolvedModule,
   importingFile: SourceFile,
+  file: SourceFile,
   mode: ModuleKind,
   errorNode: Node,
 ): void {
-  if (!resolved.resolvedUsingTsExtension) return;
-  if (isDeclarationFileName(moduleReference)) {
+  if (resolved.resolvedUsingTsExtension && isDeclarationFileName(moduleReference)) {
     if (isInEmittableImport(location))
       c.error(
         errorNode,
@@ -603,10 +616,11 @@ function checkResolvedModuleExtension(
         getSuggestedImportSource(c, moduleReference, tryExtractTSExtension(moduleReference), mode),
       );
   } else if (
+    resolved.resolvedUsingTsExtension &&
     !getAllowImportingTsExtensions(c.compilerOptions) &&
-    !isDeclarationFileName(importingFile.fileName) &&
-    isInEmittableImport(location)
+    !isDeclarationFileName(importingFile.fileName)
   ) {
+    if (!isInEmittableImport(location)) return;
     let extension = tryExtractTSExtension(moduleReference);
     // A wildcard pattern can match a `.ts` extension that doesn't end the specifier.
     if (extension === '')
@@ -620,7 +634,86 @@ function checkResolvedModuleExtension(
       Diagnostics.An_import_path_can_only_end_with_a_0_extension_when_allowImportingTsExtensions_is_enabled,
       extension,
     );
+  } else if (c.compilerOptions.rewriteRelativeImportExtensions === true)
+    checkRewrittenImportExtension(c, location, moduleReference, resolved, importingFile, file, errorNode);
+}
+
+/**
+ * Under `rewriteRelativeImportExtensions`, emit rewrites the extension of a relative import path that ends with
+ * a TypeScript extension, or with the extension of a content mapper's file whose output has another one. Reports
+ * a path emit rewrites that names a file by something else than its extension (TS2876), a path emit leaves
+ * alone that names an input file by its extension (TS2877), and a path into a referenced project whose outputs
+ * lie elsewhere, relative to this project's, than its inputs do (TS2878). A type-only import is checked where
+ * emit writes it into declarations: for a content mapper's file, when declarations are emitted.
+ */
+function checkRewrittenImportExtension(
+  c: Checker,
+  location: Node,
+  moduleReference: string,
+  resolved: ResolvedModule,
+  importingFile: SourceFile,
+  file: SourceFile,
+  errorNode: Node,
+): void {
+  const host = getModuleSpecifierHost(c).getOutputPathsHost();
+  const rewrites = host.contentMapperExtensionRewrites();
+  const useCaseSensitiveFileNames = host.useCaseSensitiveFileNames;
+  const checkDeclarationRewrite =
+    getEmitDeclarations(c.compilerOptions) &&
+    rewriteExtension(moduleReference, rewrites, useCaseSensitiveFileNames) !== undefined &&
+    pathIsRelative(moduleReference) &&
+    !importingFile.isDeclarationFile;
+  if (
+    ((location.flags & NodeFlags.Ambient) !== 0 && !checkDeclarationRewrite) ||
+    isDeclarationFileName(moduleReference) ||
+    ((isLiteralImportTypeNode(location) || isPartOfTypeOnlyImportOrExportDeclaration(location)) &&
+      !checkDeclarationRewrite)
+  )
+    return;
+  const shouldRewrite = shouldRewriteExtension(moduleReference, rewrites, useCaseSensitiveFileNames);
+  const mappedSource =
+    file.contentMapper() !== '' && rewriteExtension(file.fileName, rewrites, useCaseSensitiveFileNames) !== undefined;
+  const resolvedUsingRewritableExtension =
+    resolved.resolvedUsingTsExtension || (resolved.resolvedUsingExtraExtensions && mappedSource);
+  if (!resolvedUsingRewritableExtension) {
+    if (shouldRewrite)
+      c.error(
+        errorNode,
+        Diagnostics.This_relative_import_path_is_unsafe_to_rewrite_because_it_looks_like_a_file_name_but_actually_resolves_to_0,
+        getRelativePathFromFile(importingFile.fileName, resolved.resolvedFileName, useCaseSensitiveFileNames),
+      );
+    return;
   }
+  if (!shouldRewrite) {
+    if (mappedSource || c.host.sourceFileMayBeEmitted(file))
+      c.error(
+        errorNode,
+        Diagnostics.This_import_uses_a_0_extension_to_resolve_to_an_input_TypeScript_file_but_will_not_be_rewritten_during_emit_because_it_is_not_a_relative_path,
+        mappedSource
+          ? getExtensionRewrite(file.fileName, rewrites, useCaseSensitiveFileNames)!.source
+          : getAnyExtensionFromPath(moduleReference),
+      );
+    return;
+  }
+  const redirect = c.host.getRedirectForResolution(file);
+  if (redirect === undefined) return;
+  // The rewritten path leads from this project's output to the other's as the written path leads from this
+  // project's input to the other's only when the output directories lie as the root directories do.
+  const ownRootDir = host.commonSourceDirectory();
+  const otherRootDir = redirect.commonSourceDirectory();
+  const rootDirPath = getRelativePathFromDirectory(ownRootDir, otherRootDir, useCaseSensitiveFileNames);
+  const ownOutDir = c.compilerOptions.outDir;
+  const otherOutDir = redirect.options.outDir;
+  const outDirPath = getRelativePathFromDirectory(
+    ownOutDir === undefined || ownOutDir === '' ? ownRootDir : ownOutDir,
+    otherOutDir === undefined || otherOutDir === '' ? otherRootDir : otherOutDir,
+    useCaseSensitiveFileNames,
+  );
+  if (getRootLength(rootDirPath) !== 0 || getRootLength(outDirPath) !== 0 || rootDirPath !== outDirPath)
+    c.error(
+      errorNode,
+      Diagnostics.This_import_path_is_unsafe_to_rewrite_because_it_resolves_to_another_project_and_the_relative_path_between_the_projects_output_files_is_not_the_same_as_the_relative_path_between_its_input_files,
+    );
 }
 
 function isInEmittableImport(location: Node): boolean {
@@ -2399,6 +2492,8 @@ export function checkImportCallExpression(c: Checker, node: Node): Type {
   const args = (node as CallExpression).arguments.nodes;
   if (args.length === 0) return createPromiseReturnType(c, node, c.anyType);
   const specifier = args[0]!;
+  if (c.compilerOptions.rewriteRelativeImportExtensions === true && !isStringLiteralLike(specifier))
+    checkExternalEmitHelpers(c, node, ExternalEmitHelpers.RewriteRelativeImportExtension);
   const specifierType = checkExpressionCached(c, specifier);
   const optionsType = args.length > 1 ? checkExpressionCached(c, args[1]!) : undefined;
   // Extra arguments are a grammar error; check them for completions.

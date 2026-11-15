@@ -68,6 +68,7 @@ import {
 import {
   getCommonSourceDirectory,
   getComputedCommonSourceDirectory,
+  getExternalOutputFileName,
   getOutputPathsFor,
   getSourceFilePathInNewDirWorker,
   type OutputPathsHost,
@@ -478,6 +479,11 @@ export class Program implements OutputPathsHost {
     return this.processed.projectReferenceMapper.getCompilerOptionsForFile(file.path, file.fileName);
   }
 
+  /** The referenced project that `file` is a source or a declaration output of, if any. */
+  getRedirectForResolution(file: SourceFile): ParsedCommandLine | undefined {
+    return this.processed.projectReferenceMapper.getRedirectForResolution(file.path, file.fileName)?.resolved;
+  }
+
   importHelpersImportSpecifier(path: string): Node | undefined {
     return this.processed.importHelpersImportSpecifiers.get(path);
   }
@@ -558,6 +564,9 @@ export class Program implements OutputPathsHost {
     const options = this.options;
     if (options.noEmitForJsFiles === true && isSourceFileJS(file)) return false;
     if (file.isDeclarationFile) return false;
+    // A content mapper or its build tool writes what runs for a file the mapper produced: emit has only its
+    // declarations to write.
+    if (file.contentMapper() !== '' && !forceDtsEmit && !getEmitDeclarations(options)) return false;
     if (this.isSourceFileFromExternalLibrary(file)) return false;
     if (forceDtsEmit) return true;
     if (this.getProjectReferenceFromSource(file.path) !== undefined) return false;
@@ -645,6 +654,12 @@ export class Program implements OutputPathsHost {
     this.includeProcessor.diagnostics(this);
     mark('include diagnostics');
     this.commonSourceDirectory();
+    // Emit and the checker ask how import paths are rewritten, and the checker where the outputs of a
+    // referenced project lie that such a path leads into.
+    this.contentMapperExtensionRewrites();
+    if (this.options.rewriteRelativeImportExtensions === true)
+      for (const reference of this.processed.projectReferenceMapper.configToProjectReference.values())
+        if (reference !== undefined) reference.commonSourceDirectory();
     // File system and resolution lookups that checking and declaration emit add later (module
     // specifiers probe files and `package.json` scopes) go to tables of each thread.
     this.host.fs.prepareForSharing();
@@ -1337,11 +1352,24 @@ export class Program implements OutputPathsHost {
       const seen = new Set<string>();
       for (const file of this.processed.files) {
         if (!this.sourceFileMayBeEmitted(file, false)) continue;
-        const paths = getOutputPathsFor(file.fileName, file.scriptKind === ScriptKind.JSON, options, this, false);
+        const paths = getOutputPathsFor(file, options, this, false);
         this.verifyEmitFilePath(paths.jsFilePath, seen, configFilePath);
         this.verifyEmitFilePath(paths.sourceMapFilePath, seen, configFilePath);
         this.verifyEmitFilePath(paths.declarationFilePath, seen, configFilePath);
         this.verifyEmitFilePath(paths.declarationMapPath, seen, configFilePath);
+        this.verifyEmitFilePath(paths.externalOutputFilePath, seen, configFilePath);
+      }
+      // The output a content mapper names for a file is checked like the others, also where emit writes
+      // nothing for the file.
+      for (const file of this.processed.files) {
+        if (
+          file.contentMapper() === '' ||
+          this.sourceFileMayBeEmitted(file, false) ||
+          this.isSourceFileFromExternalLibrary(file) ||
+          this.getProjectReferenceFromSource(file.path) !== undefined
+        )
+          continue;
+        this.verifyEmitFilePath(getExternalOutputFileName(file.fileName, options, this), seen, configFilePath);
       }
       this.verifyEmitFilePath(this.commandLine.buildInfoFileName(), seen, configFilePath);
     }

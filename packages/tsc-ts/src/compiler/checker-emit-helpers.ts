@@ -8,6 +8,7 @@ import { getExportsOfModule, getSymbolOfMeaning, resolveSymbol } from './checker
 import { Diagnostics } from './diagnostics.js';
 import { NodeFlags } from './ast.js';
 import { ModuleKind, getEmitModuleKind } from './options.js';
+import { getModuleSpecifierHost } from './node-builder-names.js';
 import { type Symbol, SymbolFlags } from './symbol.js';
 
 /** The emit helpers tslib provides, in tsgo's order (which orders the errors one check reports). */
@@ -131,6 +132,19 @@ export function checkExternalEmitHelpers(c: Checker, location: Node, helpers: Ex
               'tslib',
               name,
               '5',
+            );
+        } else if (
+          (helper & ExternalEmitHelpers.RewriteRelativeImportExtension) !== 0 &&
+          getModuleSpecifierHost(c).getOutputPathsHost().contentMapperExtensionRewrites().length > 0
+        ) {
+          // The helper is called with the extensions of content mappers' files as its third argument.
+          if (!hasSignatureWithArityGreaterThan(c, symbol, 3))
+            c.error(
+              location,
+              Diagnostics.This_syntax_requires_an_imported_helper_named_1_with_2_parameters_which_is_not_compatible_with_the_one_in_0_Consider_upgrading_your_version_of_0,
+              'tslib',
+              name,
+              '4',
             );
         }
       }

@@ -29,6 +29,7 @@ import type { PackageJsonInfo } from './package-json.js';
 import type { KnownSymlinks } from './symlinks.js';
 import type { MergedGlobals } from './checker-symbols.js';
 import { Program, sortAndDeduplicateDiagnostics } from './program.js';
+import type { ParsedCommandLine } from './tsconfig.js';
 import {
   getEmitModuleFormatOfFile,
   getEmitSyntaxForUsageLocation,
@@ -145,6 +146,14 @@ export class ProgramCheckerHost extends CheckerHost {
       this.specifierHost = host;
     }
     return host;
+  }
+
+  sourceFileMayBeEmitted(file: SourceFile): boolean {
+    return this.program.sourceFileMayBeEmitted(file, false);
+  }
+
+  getRedirectForResolution(file: SourceFile): ParsedCommandLine | undefined {
+    return this.program.getRedirectForResolution(file);
   }
 }
 

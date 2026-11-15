@@ -1,8 +1,10 @@
 /**
  * Where emit writes the outputs of a source file.
  */
+import { ScriptKind, type SourceFile } from './ast.js';
 import type { CompilerOptions, JsxEmit } from './options.js';
 import {
+  type ExtensionRewrite,
   changeExtension,
   combinePaths,
   comparePaths,
@@ -13,19 +15,26 @@ import {
   getBaseFileName,
   getCanonicalFileName,
   getDirectoryPath,
+  getLongestExtensionFromPath,
   getNormalizedAbsolutePath,
   getPathComponents,
   getPathComponentsRelativeTo,
   getPathFromPathComponents,
   reducePathComponents,
+  removeExtension,
   removeFileExtension,
   resolvePath,
+  rewriteExtension,
 } from './path.js';
 
 /** What output paths depend on besides options. */
 export interface OutputPathsHost {
   /** With a trailing `/`, or `''`. */
   commonSourceDirectory(): string;
+  /** The extensions of the files content mappers produce (`ParsedCommandLine.contentMapperExtensions`). */
+  contentMapperExtensions(): readonly string[];
+  /** The extensions the outputs of those files have (`ParsedCommandLine.contentMapperExtensionRewrites`). */
+  contentMapperExtensionRewrites(): readonly ExtensionRewrite[];
   readonly currentDirectory: string;
   readonly useCaseSensitiveFileNames: boolean;
 }
@@ -37,16 +46,27 @@ export class OutputPaths {
     readonly sourceMapFilePath: string,
     readonly declarationFilePath: string,
     readonly declarationMapPath: string,
+    /**
+     * For a file a content mapper produced, the output the mapper's `outputExtensions` name for it. Emit does
+     * not write it: the mapper's own tools do, and no other output may have its name.
+     */
+    readonly externalOutputFilePath: string,
   ) {}
 }
 
+/**
+ * The outputs of `file`. A file a content mapper produced has no JavaScript output, since the mapper's own
+ * tools write what runs, and its declarations are named as `changeToDeclarationExtension` says.
+ */
 export function getOutputPathsFor(
-  fileName: string,
-  isJson: boolean,
+  file: SourceFile,
   options: CompilerOptions,
   host: OutputPathsHost,
   forceDtsEmit: boolean,
 ): OutputPaths {
+  const fileName = file.fileName;
+  const isJson = file.scriptKind === ScriptKind.JSON;
+  const isContentMapped = file.contentMapper() !== '';
   const ownOutputFilePath = getOwnEmitOutputFilePath(
     fileName,
     options,
@@ -58,7 +78,7 @@ export function getOutputPathsFor(
     isJson && comparePaths(fileName, ownOutputFilePath, host.useCaseSensitiveFileNames, host.currentDirectory) === 0;
   let jsFilePath = '';
   let sourceMapFilePath = '';
-  if (options.emitDeclarationOnly !== true && !isJsonEmittedToSameLocation) {
+  if (!isContentMapped && options.emitDeclarationOnly !== true && !isJsonEmittedToSameLocation) {
     jsFilePath = ownOutputFilePath;
     if (!isJson) sourceMapFilePath = getSourceMapFilePath(jsFilePath, options);
   }
@@ -69,7 +89,13 @@ export function getOutputPathsFor(
     if (options.declarationMap === true && getEmitDeclarations(options))
       declarationMapPath = declarationFilePath + '.map';
   }
-  return new OutputPaths(jsFilePath, sourceMapFilePath, declarationFilePath, declarationMapPath);
+  return new OutputPaths(
+    jsFilePath,
+    sourceMapFilePath,
+    declarationFilePath,
+    declarationMapPath,
+    isContentMapped ? getExternalOutputFileName(fileName, options, host) : '',
+  );
 }
 
 function getEmitDeclarations(options: CompilerOptions): boolean {
@@ -100,14 +126,16 @@ export function getOutputDeclarationFileName(
   host: OutputPathsHost,
 ): string {
   const directory = options.declarationDir ?? options.outDir ?? '';
-  return changeExtension(
-    getOutputPathWithoutChangingExtension(inputFileName, directory, host),
-    getDeclarationEmitExtensionForPath(inputFileName),
-  );
+  return changeToDeclarationExtension(getOutputPathWithoutChangingExtension(inputFileName, directory, host), host);
 }
 
+/** The JavaScript output of `inputFileName`, or `''` where emit writes none, as for a content mapper's file. */
 export function getOutputJSFileName(inputFileName: string, options: CompilerOptions, host: OutputPathsHost): string {
-  if (options.emitDeclarationOnly === true) return '';
+  if (
+    options.emitDeclarationOnly === true ||
+    getLongestExtensionFromPath(inputFileName, host.contentMapperExtensions(), host.useCaseSensitiveFileNames) !== ''
+  )
+    return '';
   const outputFileName = changeExtension(
     getOutputPathWithoutChangingExtension(inputFileName, options.outDir ?? '', host),
     getOutputExtension(inputFileName, options.jsx),
@@ -143,10 +171,44 @@ export function getOutputDeclarationFileNameWorker(
     options.declarationDir !== undefined && options.declarationDir !== ''
       ? options.declarationDir
       : (options.outDir ?? '');
-  return changeExtension(
-    getOutputPathWithoutChangingExtension(inputFileName, directory, host),
-    getDeclarationEmitExtensionForPath(inputFileName),
+  return changeToDeclarationExtension(getOutputPathWithoutChangingExtension(inputFileName, directory, host), host);
+}
+
+/**
+ * The output a content mapper's `outputExtensions` name for `inputFileName`, or `''` when no mapper changes
+ * the extension of the file.
+ */
+export function getExternalOutputFileName(
+  inputFileName: string,
+  options: CompilerOptions,
+  host: OutputPathsHost,
+): string {
+  return (
+    rewriteExtension(
+      getOutputPathWithoutChangingExtension(inputFileName, options.outDir ?? '', host),
+      host.contentMapperExtensionRewrites(),
+      host.useCaseSensitiveFileNames,
+    ) ?? ''
   );
+}
+
+/**
+ * `path` as the name of a declaration file. For a file a content mapper produces, the declarations of the
+ * output the mapper names (`Card.astro` with outputs in `.js` has `Card.d.ts`), else `.d.<extension>.ts` with the
+ * whole extension the mapper registers (`Widget.y.z` has `Widget.d.y.z.ts`).
+ */
+export function changeToDeclarationExtension(path: string, host: OutputPathsHost): string {
+  const rewritten = rewriteExtension(path, host.contentMapperExtensionRewrites(), host.useCaseSensitiveFileNames);
+  if (rewritten !== undefined) return changeToDeclarationExtensionOfPath(rewritten);
+  const extension = getLongestExtensionFromPath(path, host.contentMapperExtensions(), true);
+  if (extension !== '') return removeExtension(path, extension) + '.d' + extension + '.ts';
+  return changeToDeclarationExtensionOfPath(path);
+}
+
+function changeToDeclarationExtensionOfPath(path: string): string {
+  let withoutExtension = removeFileExtension(path);
+  if (withoutExtension === path) withoutExtension = removeExtension(path, getAnyExtensionFromPath(path));
+  return withoutExtension + getDeclarationEmitExtensionForPath(path);
 }
 
 function getOutputPathWithoutChangingExtension(
@@ -178,7 +240,7 @@ function getDeclarationEmitOutputFilePath(file: string, options: CompilerOptions
           host.commonSourceDirectory(),
           host.useCaseSensitiveFileNames,
         );
-  return removeFileExtension(path) + getDeclarationEmitExtensionForPath(path);
+  return changeToDeclarationExtension(path, host);
 }
 
 /**

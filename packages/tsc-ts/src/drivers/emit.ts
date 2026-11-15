@@ -23,7 +23,7 @@ import { CompilerHost } from '../compiler/file-loader.js';
 import { CachedFileSystem, DirectoryEntries, FileSystem } from '../compiler/file-system.js';
 import { Resolver } from '../compiler/module-resolution.js';
 import type { CompilerOptions, ModuleKind } from '../compiler/options.js';
-import { getDirectoryPath, getNormalizedAbsolutePath } from '../compiler/path.js';
+import { type ExtensionRewrite, getDirectoryPath, getNormalizedAbsolutePath } from '../compiler/path.js';
 import { Program, sortAndDeduplicateDiagnostics } from '../compiler/program.js';
 import { getEmitModuleFormatOfFile } from '../compiler/program-utilities.js';
 import { ParsedCommandLine } from '../compiler/tsconfig.js';
@@ -126,6 +126,14 @@ class DiskEmitHost extends EmitHost {
 
   isSourceFileFromExternalLibrary(file: SourceFile): boolean {
     return this.program.isSourceFileFromExternalLibrary(file);
+  }
+
+  contentMapperExtensions(): readonly string[] {
+    return this.program.contentMapperExtensions();
+  }
+
+  contentMapperExtensionRewrites(): readonly ExtensionRewrite[] {
+    return this.program.contentMapperExtensionRewrites();
   }
 
   writeFile(fileName: string, text: string, _declarationDiagnostics?: readonly Diagnostic[]): string {

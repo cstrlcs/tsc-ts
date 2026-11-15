@@ -69,6 +69,43 @@ test(
   },
 );
 
+test(
+  'emit rewrites the extensions of import paths as tsgo does',
+  { skip: (!existsSync(tsgo) || !existsSync(cases)) && 'needs upstream sources and tsgo' },
+  async () => {
+    // TypeScript's cases of `rewriteRelativeImportExtensions`: paths that are rewritten, paths that a helper
+    // rewrites at run time, and paths that are left alone.
+    const command = buildEmitDriver();
+    const dir = tempDir('tsc-ts-emit-rewrites-test-');
+    const units = materializeGrouped(
+      [
+        'conformance/externalModules/rewriteRelativeImportExtensions/emit.ts',
+        'conformance/externalModules/rewriteRelativeImportExtensions/emitModuleCommonJS.ts',
+        'compiler/rewriteRelativeImportExtensionsDynamicImportCjs.ts',
+      ].map((name) => join(cases, name)),
+      dir,
+    );
+    for (const flags of [
+      [],
+      ['--jsx', 'react', '--verbatimModuleSyntax'],
+      ['--module', 'preserve'],
+      ['--module', 'commonjs'],
+      ['--module', 'commonjs', '--importHelpers'],
+      ['--module', 'nodenext'],
+    ]) {
+      const result = await compareEmits(
+        command,
+        dir,
+        units.map((unit) => unit.path),
+        ['--rewriteRelativeImportExtensions', ...flags],
+        1,
+      );
+      assert.deepEqual(result.failures, [], `emitting with ${flags.join(' ') || 'defaults'}`);
+      assert.equal(result.units - result.unsupported, 3);
+    }
+  },
+);
+
 // Code with and without comments side by side: comment-like text in strings, regular expressions,
 // templates and JSX text, comments right after tokens, and trailing comments where nested nodes end.
 const commentPlacements = {
