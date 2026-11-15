@@ -1008,6 +1008,115 @@ test(
   },
 );
 
+/** The name of each value of an enum: the first one, where a value has several. */
+function namesOf(enumObject) {
+  const names = new Map();
+  for (const [name, value] of Object.entries(enumObject))
+    if (typeof value === 'number' && !names.has(value)) names.set(value, name);
+  return names;
+}
+
+test('the scanner, the comment ranges and skipTrivia give what TypeScript gives', { skip }, async () => {
+  const ts5 = (await import('typescript-5.9')).default;
+  const api = await load('library/index.js');
+  const names = namesOf(api.SyntaxKind);
+  const names5 = namesOf(ts5.SyntaxKind);
+  names5.set(ts5.SyntaxKind.EndOfFileToken, 'EndOfFile');
+  // TypeScript 7 has token flags that TypeScript 5 lacks (SingleQuote).
+  const flags5 = Object.values(ts5.TokenFlags).reduce((all, flag) => (typeof flag === 'number' ? all | flag : all), 0);
+  const token = (scanner, kinds) =>
+    [
+      kinds.get(scanner.getToken()),
+      scanner.getTokenFullStart(),
+      scanner.getTokenStart(),
+      scanner.getTokenEnd(),
+      scanner.getTokenText(),
+      scanner.getTokenValue(),
+      scanner.getTokenFlags() & flags5,
+      scanner.hasPrecedingLineBreak(),
+      scanner.isUnterminated(),
+    ].join(' ');
+  const ranges = (comments, kinds) =>
+    (comments ?? []).map((c) => `${kinds.get(c.kind)} ${c.pos} ${c.end} ${c.hasTrailingNewLine}`).join(', ');
+  const failures = [];
+  let compared = 0;
+  const expect = (actual, expected, what) => {
+    compared++;
+    if (actual !== expected) failures.push(`${what}: ${actual} != ${expected}`);
+  };
+  for (const name of [
+    'edge-cases.ts',
+    'heritage-clauses.ts',
+    'jsx.tsx',
+    'library/src/main.ts',
+    'library/src/types.ts',
+    'services/src/docs.ts',
+    'services/src/legacy.js',
+  ]) {
+    // TypeScript 7 scans a shebang as trivia of the first token and a later `#!` as one token, where TypeScript 5
+    // gives a ShebangTrivia token and `#` alone: the text is compared without them.
+    const text = readFileSync(join(root, 'tests/fixtures', name), 'utf8').replaceAll('#!', '');
+    const variant = name.endsWith('x') ? api.LanguageVariant.JSX : api.LanguageVariant.Standard;
+    for (const skipTrivia of [true, false]) {
+      const scanner = api.createScanner(skipTrivia, variant, text);
+      const scanner5 = ts5.createScanner(ts5.ScriptTarget.Latest, skipTrivia, variant, text);
+      assert.equal(scanner.getText(), text);
+      // The current token read again, by scanners that take their text and variant after they are created.
+      const again = api.createScanner(skipTrivia);
+      const again5 = ts5.createScanner(ts5.ScriptTarget.Latest, skipTrivia);
+      for (const other of [again, again5]) {
+        other.setText(text);
+        other.setLanguageVariant(variant);
+      }
+      const rescan = (method, ...args) => {
+        again.resetTokenState(scanner.getTokenFullStart());
+        again5.resetTokenState(scanner5.getTokenFullStart());
+        again.scan();
+        again5.scan();
+        // Without the flags, where TypeScript 7 also marks an invalid `\u` escape of a template as a Unicode
+        // escape, and without getToken(), which TypeScript's JavaScript scanners leave unchanged for JSX text.
+        const answer = (s, kinds) =>
+          [kinds.get(s[method](...args)), s.getTokenStart(), s.getTokenEnd(), s.getTokenValue()].join(' ');
+        const what = `${name} ${method}(${args.join()}) at ${scanner.getTokenStart()}`;
+        expect(answer(again, names), answer(again5, names5), what);
+      };
+      for (;;) {
+        const kind = scanner.scan();
+        scanner5.scan();
+        expect(token(scanner, names), token(scanner5, names5), `${name} token at ${scanner.getTokenStart()}`);
+        if (kind === api.SyntaxKind.GreaterThanToken) rescan('reScanGreaterToken');
+        if (kind === api.SyntaxKind.SlashToken || kind === api.SyntaxKind.SlashEqualsToken) rescan('reScanSlashToken');
+        if (kind === api.SyntaxKind.CloseBraceToken) {
+          rescan('reScanTemplateToken', false);
+          rescan('reScanTemplateToken', true);
+        }
+        if (variant === api.LanguageVariant.JSX) {
+          rescan('scanJsxToken');
+          rescan('reScanJsxToken');
+          rescan('reScanJsxToken', false);
+        }
+        if (kind === api.SyntaxKind.EndOfFile) break;
+      }
+    }
+    for (let pos = 0; pos <= text.length; pos++) {
+      for (const method of ['getLeadingCommentRanges', 'getTrailingCommentRanges'])
+        expect(
+          ranges(api[method](text, pos), names),
+          ranges(ts5[method](text, pos), names5),
+          `${name} ${method} ${pos}`,
+        );
+      for (const options of [[], [true], [false, true], [false, false, true], [true, true, true]])
+        expect(
+          api.skipTrivia(text, pos, ...options),
+          ts5.skipTrivia(text, pos, ...options),
+          `${name} skipTrivia ${pos} ${options.join()}`,
+        );
+    }
+  }
+  assert.deepEqual(failures.slice(0, 20), []);
+  assert.ok(compared > 50000, `${compared} answers compared`);
+});
+
 test('a program takes a file parse threads prepared only when the host gives the same text', { skip }, async () => {
   const api = await load('library/index.js');
   const { parallelParse, PreparedFile } = await load('compiler/parallel-parse.js');

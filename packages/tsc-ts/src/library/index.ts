@@ -9,6 +9,15 @@ export { createProgram, createProgramFromConfigFile, getPreEmitDiagnostics, pars
 export { DisposedProgramError, InternalCompilerError } from './errors.js';
 export { parseSourceFile, type ParseSourceFileOptions } from './parse.js';
 export {
+  type CommentKind,
+  type CommentRange,
+  createScanner,
+  getLeadingCommentRanges,
+  getTrailingCommentRanges,
+  type Scanner,
+  skipTrivia,
+} from './scanner.js';
+export {
   canHaveModifiers,
   flattenDiagnosticMessageText,
   forEachChild,

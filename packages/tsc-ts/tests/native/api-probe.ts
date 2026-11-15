@@ -1,22 +1,28 @@
 // Prints tsc-ts/api's answers for a project, one line each: its files and diagnostics, the symbol, types and
-// signatures at every node of its files outside the default libraries, and the answers of the program with its last
-// file updated and of a program that takes its files. The same answers are expected from a Node build and a native
-// build of this file.
+// signatures at every node of its files outside the default libraries, the tokens and comments of their texts, and
+// the answers of the program with its last file updated and of a program that takes its files. The same answers are
+// expected from a Node build and a native build of this file.
 // Usage: api-probe <tsconfig.json> <default library directory>
 import {
+  type CommentRange,
   createProgramFromConfigFile,
+  createScanner,
   type Diagnostic,
   type Expression,
+  getLeadingCommentRanges,
   getPreEmitDiagnostics,
   getSourceFileOfNode,
   getTextOfNode,
+  getTrailingCommentRanges,
   InternalCompilerError,
   type Node,
   parseSourceFile,
   type Program,
+  type Scanner,
   type Signature,
   type StringLiteralLike,
   SignatureKind,
+  skipTrivia,
   type SourceFile,
   type Symbol,
   SymbolFlags,
@@ -94,6 +100,7 @@ function probe(program: Program, checker: TypeChecker): void {
       }
     });
   }
+  for (const file of program.getSourceFiles()) if (!program.isSourceFileDefaultLibrary(file)) probeTokens(file);
   for (const symbol of symbols.slice(0, 400)) {
     print(`symbol ${symbolText(symbol)}`);
     print(`  type ${keep(checker.getTypeOfSymbol(symbol))}`);
@@ -157,6 +164,47 @@ function probeOldProgram(program: Program, next: Program): void {
   print(`old program ${next.getSourceFiles().length} files ${taken} taken`);
   for (const d of next.getSemanticDiagnostics()) print(`  semantic ${diagnosticText(d)}`);
   next.dispose();
+}
+
+function commentsText(comments: readonly CommentRange[] | undefined): string {
+  if (comments === undefined) return '-';
+  return comments.map((c) => `${c.kind}:${c.pos}-${c.end}:${c.hasTrailingNewLine}`).join(',');
+}
+
+function tokenText(scanner: Scanner): string {
+  return `${scanner.getToken()} ${scanner.getTokenStart()}-${scanner.getTokenEnd()} ${JSON.stringify(scanner.getTokenValue())}`;
+}
+
+/** The tokens of a file with their trivia, each read again as the parser may read it, and the comments around them. */
+function probeTokens(file: SourceFile): void {
+  const text = file.text;
+  const scanner = createScanner(false, file.languageVariant, text);
+  const again = createScanner(true);
+  again.setText(scanner.getText());
+  again.setLanguageVariant(file.languageVariant);
+  for (;;) {
+    const kind = scanner.scan();
+    const start = scanner.getTokenFullStart();
+    print(
+      `token ${kind} ${start}-${scanner.getTokenStart()}-${scanner.getTokenEnd()} ${scanner.getTokenFlags()} ${JSON.stringify(scanner.getTokenText())} ${scanner.hasPrecedingLineBreak()} ${scanner.isUnterminated()}`,
+    );
+    print(
+      `  trivia ${skipTrivia(text, start)} ${skipTrivia(text, start, true)} ${skipTrivia(text, start, false, true)}`,
+    );
+    print(`  leading ${commentsText(getLeadingCommentRanges(text, start))}`);
+    print(`  trailing ${commentsText(getTrailingCommentRanges(text, scanner.getTokenEnd()))}`);
+    again.resetTokenState(start);
+    again.scan();
+    if (kind === SyntaxKind.GreaterThanToken) print(`  greater ${again.reScanGreaterToken()} ${tokenText(again)}`);
+    if (kind === SyntaxKind.SlashToken) print(`  slash ${again.reScanSlashToken()} ${tokenText(again)}`);
+    if (kind === SyntaxKind.CloseBraceToken)
+      print(`  template ${again.reScanTemplateToken(false)} ${tokenText(again)}`);
+    if (kind === SyntaxKind.OpenBraceToken) {
+      print(`  jsx ${again.scanJsxToken()} ${tokenText(again)}`);
+      print(`  jsx again ${again.reScanJsxToken()} ${tokenText(again)}`);
+    }
+    if (kind === SyntaxKind.EndOfFile) break;
+  }
 }
 
 function isTupleTypeReference(type: Type): type is TupleTypeReference {
