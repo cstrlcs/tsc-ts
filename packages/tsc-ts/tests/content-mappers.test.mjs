@@ -1,13 +1,16 @@
 // The content mappers of tsgo's compiler tests, ported in content-mappers.mjs. Every file that the upstream
 // cases named contentMapper*.ts give to a mapper, and inputs that reach the rest of each mapper, go to the port
 // and to tsgo's mapper (packages/tsgo/dist/contentmapper-oracle, built by `npm run build:oracle`). The raw
-// responses are compared, and then what tsc-ts and tsgo make of them.
+// responses are compared, and then what tsc-ts and tsgo make of them. The same inputs go to the port running as
+// a process (content-mapper-server.mjs), which tsgo's command line then runs through a launcher.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { spawn as spawnProcess, spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { delimiter, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createCases, runOracle } from './content-mapper-cases.mjs';
+import { createFrameReader, frame, mapperNames, writeMapperLaunchers } from './content-mapper-server.mjs';
 import {
   createTestMapperSpawner,
   failingMapper,
@@ -19,10 +22,11 @@ import {
   transformingMapper,
 } from './content-mappers.mjs';
 import { parseTestCase } from './module-resolution-cases.mjs';
-import { compileSources } from './temp.mjs';
+import { compileSources, tempDir } from './temp.mjs';
 
 const repo = resolve(import.meta.dirname, '../../..');
 const oracle = join(repo, 'packages/tsgo/dist/contentmapper-oracle');
+const tsgo = join(repo, 'packages/tsgo/dist/tsgo');
 const upstream = join(repo, 'upstream/TypeScript/tsc/testdata/tests/cases/compiler');
 const skip = (!existsSync(oracle) || !existsSync(upstream)) && 'needs upstream sources and the contentmapper oracle';
 
@@ -166,6 +170,17 @@ function otherCases() {
   return cases;
 }
 
+/** The requests the oracle sends to the mapper of a case, each as its method and its parameters as JSON. */
+function requestsOf(item) {
+  const options = compilerOptions(item.compilerOptions);
+  return [
+    ['initialize', protocol.marshalInitializeParams('')],
+    ['openProject', protocol.marshalOpenProjectParams(item.configFileName, 'wire', mapper(item.mapper), options)],
+    ['transform', protocol.marshalTransformParams(item.fileName, item.content, 'wire')],
+    ['closeProject', protocol.marshalCloseProjectParams('wire')],
+  ];
+}
+
 /** The raw response of the mapper of a case to each request, as the oracle sends them. */
 function wire(item) {
   let testMapper;
@@ -175,24 +190,63 @@ function wire(item) {
     return { spawn: error.message };
   }
   const responses = {};
-  const call = (method, params) => {
+  for (const [method, params] of requestsOf(item)) {
     try {
       responses[method] = testMapper.handleRequest(method, JSON.parse(params)) ?? null;
     } catch (error) {
       responses[method] = { $error: `ipc: remote error [-32603]: ${error.message}` };
     }
-  };
-  const options = compilerOptions(item.compilerOptions);
-  call('initialize', protocol.marshalInitializeParams(''));
-  call('openProject', protocol.marshalOpenProjectParams(item.configFileName, 'wire', mapper(item.mapper), options));
-  call('transform', protocol.marshalTransformParams(item.fileName, item.content, 'wire'));
-  call('closeProject', protocol.marshalCloseProjectParams('wire'));
+  }
   return responses;
 }
 
+/** A directory with a launcher for each ported mapper, which run them as processes. */
+function launchers() {
+  return writeMapperLaunchers(tempDir('tsc-ts-content-mapper-launchers-'), join(out, 'compiler/span-map.js'));
+}
+
+/**
+ * A mapper process started by its launcher. `request(method, params)` sends a request and resolves to its
+ * response, in the shape `wire` gives one.
+ */
+function startMapper(launcher) {
+  const child = spawnProcess(launcher, [], {
+    stdio: ['pipe', 'pipe', 'inherit'],
+    shell: process.platform === 'win32',
+  });
+  const reader = createFrameReader();
+  const pending = new Map();
+  let nextId = 0;
+  child.stdout.on('data', (chunk) => {
+    for (const { id, result, error } of reader.push(chunk)) {
+      const response = error === undefined ? result : { $error: `ipc: remote error [${error.code}]: ${error.message}` };
+      pending.get(id).answer(response);
+      pending.delete(id);
+    }
+  });
+  const exited = new Promise((exit) => child.on('exit', exit));
+  // A mapper that ends with requests unanswered fails them.
+  exited.then((status) => {
+    for (const { fail } of pending.values()) fail(new Error(`${launcher} exited with status ${status}`));
+  });
+  return {
+    request(method, params) {
+      const id = `api${++nextId}`;
+      child.stdin.write(frame({ jsonrpc: '2.0', id, method, params: JSON.parse(params) }));
+      return new Promise((answer, fail) => pending.set(id, { answer, fail }));
+    },
+    /** Ends the mapper's input and resolves to its exit status. */
+    end() {
+      child.stdin.end();
+      return exited;
+    },
+  };
+}
+
+const fromUpstream = skip ? [] : upstreamCases();
+const cases = [...fromUpstream, ...otherCases()];
+
 test("the ported test mappers answer as tsgo's, and both hosts make the same of the answers", { skip }, () => {
-  const fromUpstream = upstreamCases();
-  const cases = [...fromUpstream, ...otherCases()];
   const expected = runOracle(oracle, out, cases);
   for (let i = 0; i < cases.length; i++) {
     const name = `case ${i} (${cases[i].name ?? cases[i].testMapper}): ${JSON.stringify(cases[i].content)}`;
@@ -220,3 +274,65 @@ test("the ported test mappers answer as tsgo's, and both hosts make the same of 
     ].sort(),
   );
 });
+
+// A mapper that stops answering fails these tests instead of holding them: tsgo limits only `initialize`.
+const timeout = 300_000;
+
+test('a mapper running as a process answers as it does in the process of the test', { timeout }, async () => {
+  const directory = launchers();
+  const processes = new Map();
+  let compared = 0;
+  try {
+    for (const item of cases) {
+      // A command that names no mapper has no launcher.
+      if (!mapperNames.includes(item.testMapper)) continue;
+      let testMapper = processes.get(item.testMapper);
+      if (testMapper === undefined) {
+        testMapper = startMapper(join(directory, item.testMapper));
+        processes.set(item.testMapper, testMapper);
+      }
+      const responses = {};
+      for (const [method, params] of requestsOf(item)) responses[method] = await testMapper.request(method, params);
+      assert.deepEqual(responses, wire(item), `${item.testMapper}: ${JSON.stringify(item.content)}`);
+      compared++;
+    }
+  } finally {
+    // A mapper ends when the compiler closes its input. All are ended before a status is judged, so that none
+    // is left running.
+    const statuses = await Promise.all(Array.from(processes.values(), (testMapper) => testMapper.end()));
+    assert.deepEqual(
+      statuses,
+      statuses.map(() => 0),
+    );
+  }
+  assert.equal(compared, cases.length - 1);
+  assert.equal(processes.size, mapperNames.length);
+});
+
+test(
+  "tsgo's command line runs a mapper through its launcher and prints the mapper's diagnostic",
+  { skip: skip || (!existsSync(tsgo) && 'needs packages/tsgo/dist/tsgo'), timeout },
+  () => {
+    // The files of an upstream case, on the disk.
+    const project = tempDir('tsc-ts-content-mapper-project-');
+    const name = 'contentMapperDiagnostics.ts';
+    for (const file of parseTestCase(readFileSync(join(upstream, name), 'utf8'), name).files) {
+      mkdirSync(dirname(join(project, file.name)), { recursive: true });
+      writeFileSync(join(project, file.name), file.content);
+    }
+    const run = (path) =>
+      spawnSync(tsgo, ['-p', '.', '--runExternalCode', '--noEmit', '--pretty', 'false'], {
+        cwd: project,
+        encoding: 'utf8',
+        env: { ...process.env, PATH: path },
+        timeout,
+      });
+    const mapped = run(`${launchers()}${delimiter}${process.env.PATH}`);
+    assert.equal(mapped.stdout, 'widget.box(3,23): error box1000: Unclosed interpolation.\n');
+    assert.equal(mapped.status, 2);
+    // Without the launcher on PATH the mapper cannot start, so the diagnostic above came from the process.
+    const missing = run(process.env.PATH);
+    assert.match(missing.stdout, /The content mapper command 'compiler-test-mapper' could not be started/);
+    assert.equal(missing.status, 2);
+  },
+);
