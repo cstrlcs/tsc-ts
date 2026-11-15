@@ -12,6 +12,10 @@
 // as JSON, the parameters each request carried, the decoded transform result
 // or its error, and the virtual files the result is parsed into.
 //
+// A case with "testMapper" runs the mapper of that name from TypeScript-Go's
+// own tests (testutil/contentmappertest) instead, and also answers with the
+// raw responses that mapper gives ("wire").
+//
 // Positions are printed as UTF-16 offsets, where TypeScript-Go counts bytes.
 package main
 
@@ -32,6 +36,7 @@ import (
 	"github.com/microsoft/TypeScript/tsc/internal/json"
 	"github.com/microsoft/TypeScript/tsc/internal/locale"
 	"github.com/microsoft/TypeScript/tsc/internal/spanmap"
+	"github.com/microsoft/TypeScript/tsc/internal/testutil/contentmappertest"
 	"github.com/microsoft/TypeScript/tsc/internal/tspath"
 )
 
@@ -58,6 +63,7 @@ type request struct {
 	Initialize      stdjson.RawMessage `json:"initialize"`
 	OpenProject     stdjson.RawMessage `json:"openProject"`
 	Transform       stdjson.RawMessage `json:"transform"`
+	TestMapper      string             `json:"testMapper"`
 }
 
 type answer struct {
@@ -72,6 +78,7 @@ type answer struct {
 	Parse             any               `json:"parse"`
 	WatchedFiles      any               `json:"watchedFiles"`
 	OptionDiagnostics [][]any           `json:"optionDiagnostics"`
+	Wire              map[string]any    `json:"wire,omitempty"`
 }
 
 // canned answers each request of the protocol with the response its case gives, and records the parameters.
@@ -112,6 +119,56 @@ func (c *canned) HandleRequest(ctx context.Context, method string, params json.V
 
 func (c *canned) HandleNotification(ctx context.Context, method string, params json.Value) error {
 	return nil
+}
+
+// noRequests is the compiler's side of a connection to a mapper, which a mapper sends nothing.
+type noRequests struct{}
+
+func (noRequests) HandleRequest(ctx context.Context, method string, params json.Value) (any, error) {
+	return nil, fmt.Errorf("unexpected request %s", method)
+}
+
+func (noRequests) HandleNotification(ctx context.Context, method string, params json.Value) error {
+	return nil
+}
+
+// wire sends each request of the protocol to a test mapper and returns the raw responses by method.
+func wire(r *request, mapper *contentmapper.Mapper, options *core.CompilerOptions) map[string]any {
+	out := map[string]any{}
+	rwc, err := contentmappertest.NewSpawner().Spawn(mapper.Exec, "", io.Discard)
+	if err != nil {
+		out["spawn"] = err.Error()
+		return out
+	}
+	defer rwc.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	conn := ipc.NewAsyncConn(rwc, noRequests{})
+	go func() { _ = conn.Run(ctx) }()
+	call := func(method string, params any) {
+		raw, err := conn.Call(ctx, method, params)
+		if err != nil {
+			out[method] = map[string]any{"$error": err.Error()}
+		} else {
+			out[method] = stdjson.RawMessage(raw)
+		}
+	}
+	compilerOptions, err := json.Marshal(options)
+	if err != nil {
+		panic(err)
+	}
+	call(contentmapper.MethodInitialize, contentmapper.InitializeParams{
+		PositionEncodings: []contentmapper.PositionEncoding{contentmapper.PositionEncodingUTF8, contentmapper.PositionEncodingUTF16},
+	})
+	call(contentmapper.MethodOpenProject, contentmapper.OpenProjectParams{
+		ConfigFileName:  r.ConfigFileName,
+		ProjectHandle:   "wire",
+		Options:         mapper.Options,
+		CompilerOptions: compilerOptions,
+	})
+	call(contentmapper.MethodTransform, contentmapper.TransformParams{FileName: r.FileName, Content: r.Content, ProjectHandle: "wire"})
+	call(contentmapper.MethodCloseProject, contentmapper.CloseProjectParams{ProjectHandle: "wire"})
+	return out
 }
 
 func describeError(err error) map[string]any {
@@ -220,11 +277,16 @@ func run(r *request) answer {
 	a.TransformIdentity = fmt.Sprintf("%x", mapper.TransformIdentity(options).Bytes())
 
 	handler := &canned{request: r, params: map[string]string{}}
-	spawner := contentmapper.SpawnerFunc(func(command []string, dir string, stderr io.Writer) (io.ReadWriteCloser, error) {
+	var spawner contentmapper.Spawner = contentmapper.SpawnerFunc(func(command []string, dir string, stderr io.Writer) (io.ReadWriteCloser, error) {
 		client, server := net.Pipe()
 		go func() { _ = ipc.NewAsyncConn(server, handler).Run(context.Background()) }()
 		return client, nil
 	})
+	if r.TestMapper != "" {
+		mapper.Exec = []string{r.TestMapper}
+		a.Wire = wire(r, mapper, options)
+		spawner = contentmappertest.NewSpawner()
+	}
 	host := contentmapper.NewHost(context.Background(), spawner, locale.Default)
 	defer host.Close()
 	project := host.Project(contentmapper.ProjectSpec{

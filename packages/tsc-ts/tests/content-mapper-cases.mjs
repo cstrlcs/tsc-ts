@@ -197,5 +197,5 @@ export function createCases(compiled) {
     return outcomes;
   }
 
-  return { mapper, answer, assertSameAnswers };
+  return { mapper, compilerOptions, answer, assertSameAnswers };
 }
