@@ -131,7 +131,7 @@ async function loadSchema() {
   if (!schemaText.includes(rootImport)) throw new Error('schema.ts no longer imports repoRoot from gen/utils.mts');
   writeFileSync(schemaCopy, schemaText.replace(rootImport, `const ROOT = ${JSON.stringify(upstream)};`));
   try {
-    return (await import(pathToFileURL(schemaCopy).href)).api;
+    return await import(pathToFileURL(schemaCopy).href);
   } finally {
     rmSync(schemaDir, { recursive: true, force: true });
   }
@@ -306,37 +306,118 @@ function generateAst(api) {
   return header + body + '\n';
 }
 
-// The type guards of the node interfaces that have their own kinds, as generate-ts-ast.ts generates them
-// (generateIsGenerated): named `is` and the interface's name, and true for each kind of the interface's
-// node, which for import and type alias declarations includes the kind of their JSDoc form.
-function generateIs(api) {
-  const guards = [];
+// The type guards, as generate-ts-ast.ts generates them (generateIsGenerated), with its names: for a node
+// interface, `is` and the interface's name, true for each kind of the interface's node (for import and
+// type alias declarations, also the kind of their JSDoc form); for a union of node interfaces, `is` and
+// the union's name; for a set of kinds, `is` and its name without `Syntax`, taking a kind; and for a token
+// type, `is` and its name.
+function generateIs(api, kindGuardName) {
+  const types = new Set(['Node']);
+  const functions = [];
+  const names = new Set();
+  const add = (name, parameter, result, conditions) => {
+    names.add(name);
+    functions.push(`export function ${name}(${parameter}): ${result} {\n  return ${conditions.join(' || ')};\n}\n`);
+  };
+  const nodeGuard = (type, conditions) => {
+    types.add(type);
+    add(`is${type}`, 'node: Node', `node is ${type}`, conditions);
+  };
+  const kindChecks = (kinds) => kinds.map((kind) => `node.kind === ${kind}`);
+  const variants = api
+    .nodes()
+    .filter(isVariantNode)
+    .flatMap((node) => node.kindTypes().map((kind) => kind.name));
+
+  // Node interfaces. One whose kind is a type parameter takes the guard of the parameter's kinds.
   for (const node of api.nodes()) {
-    if (isVariantNode(node) || node.kindType.kind === 'typeParameter') continue;
-    guards.push({ name: node.name, kinds: node.allKinds().map((kind) => kind.formatTypeScript()) });
+    if (isVariantNode(node)) continue;
+    const kindParameter = node.typeParameters.find((tp) => tp.constraint && api.hasKindAlias(tp.constraint));
+    if (kindParameter !== undefined) nodeGuard(node.name, [`${kindGuardName(kindParameter.constraint)}(node.kind)`]);
+    else nodeGuard(node.name, kindChecks(node.allKinds().map((kind) => kind.formatTypeScript())));
   }
+  for (const kind of variants) nodeGuard(kind, kindChecks([`SyntaxKind.${kind}`]));
+
+  // Unions of node interfaces whose members all have known kinds; TypeScript 7 writes the guards of the
+  // others (Expression, Statement) by hand.
+  const kindOfTokenType = new Map();
   for (const node of api.nodes())
-    if (isVariantNode(node))
-      for (const kind of node.kindTypes()) guards.push({ name: kind.name, kinds: [`SyntaxKind.${kind.name}`] });
-  const types = ['Node', ...guards.map((guard) => guard.name)].sort();
+    for (const { name, typeArg } of node.instantiationAliases)
+      if (!api.hasKindAlias(typeArg)) kindOfTokenType.set(name, typeArg);
+  const kindsOfMembers = (members) => {
+    const kinds = [];
+    for (const member of members) {
+      const node = api.getNode(member);
+      const alias = api.nodeAliases().find((a) => a.name === member);
+      if (node) kinds.push(...node.allKinds().map((kind) => kind.formatTypeScript()));
+      else if (variants.includes(member)) kinds.push(`SyntaxKind.${member}`);
+      else if (kindOfTokenType.has(member)) kinds.push(`SyntaxKind.${kindOfTokenType.get(member)}`);
+      else if (alias?.isUnion) {
+        const nested = kindsOfMembers(alias.unionMemberNames);
+        if (nested === undefined) return undefined;
+        kinds.push(...nested);
+      } else if (api.hasKindAlias(member))
+        kinds.push(...api.expandKindAliasMembers(member).map((kind) => kind.formatTypeScript()));
+      else return undefined;
+    }
+    return kinds;
+  };
+  for (const alias of api.nodeAliases()) {
+    if (!alias.isUnion || alias.unionMemberNames.length === 0 || names.has(`is${alias.name}`)) continue;
+    const members = alias.unionMemberNames;
+    const kinds = kindsOfMembers(members);
+    if (kinds === undefined || kinds.length === 0) continue;
+    const kindAliases = members.filter((member) => api.hasKindAlias(member));
+    if (kindAliases.length === 0) nodeGuard(alias.name, kindChecks([...new Set(kinds)]));
+    else
+      nodeGuard(alias.name, [
+        ...kindAliases.map((member) => `${kindGuardName(member)}(node.kind)`),
+        ...kindChecks([...new Set(kindsOfMembers(members.filter((member) => !api.hasKindAlias(member))))]),
+      ]);
+  }
+
+  // Sets of kinds: listed, or a range of the enum.
+  const rangeGuards = new Set();
+  const kindGuards = api.kindGuards().filter((guard) => !names.has(guard.guardName));
+  for (const guard of kindGuards) {
+    if (guard.type === 'range') continue;
+    types.add(guard.aliasName);
+    const conditions = guard.members.map((member) =>
+      api.hasKindAlias(member) ? `${kindGuardName(member)}(kind)` : `kind === SyntaxKind.${member}`,
+    );
+    add(guard.guardName, 'kind: SyntaxKind', `kind is ${guard.aliasName}`, conditions);
+  }
+  for (const guard of kindGuards) {
+    if (guard.type !== 'range') continue;
+    rangeGuards.add(guard.guardName);
+    add(guard.guardName, 'kind: SyntaxKind', 'boolean', [
+      `(kind >= SyntaxKind.${guard.first} && kind <= SyntaxKind.${guard.last})`,
+    ]);
+  }
+
+  // Token types: a token of one kind, or of a set of kinds.
+  for (const node of api.nodes())
+    for (const { name, typeArg } of node.instantiationAliases) {
+      if (names.has(`is${name}`)) continue;
+      if (!api.hasKindAlias(typeArg)) nodeGuard(name, kindChecks([`SyntaxKind.${typeArg}`]));
+      else if (rangeGuards.has(kindGuardName(typeArg)))
+        add(`is${name}`, 'node: Node', 'boolean', [`${kindGuardName(typeArg)}(node.kind)`]);
+      else nodeGuard(name, [`${kindGuardName(typeArg)}(node.kind)`]);
+    }
+
   const header =
     notice('TypeScript tools/scripts/tsc/ast.json') +
-    `\nimport type { ${types.join(', ')} } from './ast.js';\n` +
+    `\nimport type { ${[...types].sort().join(', ')} } from './ast.js';\n` +
     `import { SyntaxKind } from './enums.generated.js';\n\n`;
-  const functions = guards.map(
-    ({ name, kinds }) =>
-      `export function is${name}(node: Node): node is ${name} {\n` +
-      `  return ${kinds.map((kind) => `node.kind === ${kind}`).join(' || ')};\n}\n`,
-  );
   return header + functions.join('\n');
 }
 
-const api = await loadSchema();
+const { api, kindGuardName } = await loadSchema();
 const outputs = [
   ['enums.generated.ts', generateEnums()],
   ['compiler-options.generated.ts', generateCompilerOptions()],
   ['ast.generated.ts', generateAst(api)],
-  ['is.generated.ts', generateIs(api)],
+  ['is.generated.ts', generateIs(api, kindGuardName)],
 ];
 let stale = false;
 for (const [name, content] of outputs) {

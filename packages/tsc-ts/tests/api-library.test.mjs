@@ -1201,6 +1201,104 @@ test('getChildren, getFirstToken and getLastToken give what TypeScript gives', {
   assert.ok(compared > 2000, `${compared} nodes compared`);
 });
 
+test('the type guards answer as the TypeScript functions of the same names', { skip }, async () => {
+  const ts5 = (await import('typescript-5.9')).default;
+  const api = await load('library/index.js');
+  const { SyntaxKind } = api;
+  const names = namesOf(SyntaxKind);
+  const names5 = namesOf(ts5.SyntaxKind);
+  names5.set(ts5.SyntaxKind.EndOfFileToken, 'EndOfFile');
+  // The guards both versions have, but for two that answer by the node's kind alone in TypeScript 7, where
+  // TypeScript 5 also looks at the node's parent or children.
+  const guards = Object.keys(api).filter(
+    (name) =>
+      /^(is|has)[A-Z]/.test(name) &&
+      typeof api[name] === 'function' &&
+      typeof ts5[name] === 'function' &&
+      name !== 'isDeclarationName' &&
+      name !== 'isDestructuringAssignment',
+  );
+  const takesKind = (name) => api[name].toString().startsWith(`function ${name}(kind)`);
+  // The kinds for which a guard of TypeScript 7 answers differently from TypeScript 5's: a JSX expression is an
+  // expression and a missing declaration is not, the type expression, type literal and signature of JSDoc are type
+  // nodes, JSX text is not a literal expression, an `instanceof` expression is call-like, a bigint literal is a
+  // property name, `!` is not a logical operator, and the name of a JSDoc namespace is not a module body.
+  const changed = new Map([
+    ['isExpression', ['JsxExpression', 'MissingDeclaration']],
+    ['isTypeNode', ['JSDocTypeExpression', 'JSDocTypeLiteral', 'JSDocSignature']],
+    ['isLiteralExpression', ['JsxText']],
+    ['isCallLikeExpression', ['BinaryExpression']],
+    ['isPropertyName', ['BigIntLiteral']],
+    ['isLogicalOperator', ['ExclamationToken']],
+    ['isModuleBody', ['Identifier']],
+  ]);
+  const failures = [];
+  const compare = (name, kind, actual, expected) => {
+    if (actual !== expected && !changed.get(name)?.includes(kind)) failures.push(`${name}(${kind}): ${actual}`);
+  };
+
+  // Guards of kinds, on every kind both versions have; isExpression and isTypeNode, which answer by the node's
+  // kind in both versions, on an object of each of those kinds but PartiallyEmittedExpression, which the parser
+  // never makes and TypeScript 5 looks inside.
+  const kinds5 = new Map([...names5].map(([kind, name]) => [name, kind]));
+  for (const [kind, kindName] of names) {
+    if (!kinds5.has(kindName)) continue;
+    const kind5 = kinds5.get(kindName);
+    for (const name of guards) if (takesKind(name)) compare(name, kindName, api[name](kind), ts5[name](kind5));
+    if (kind === SyntaxKind.PartiallyEmittedExpression) continue;
+    for (const name of ['isExpression', 'isTypeNode'])
+      compare(name, kindName, api[name]({ kind }), ts5[name]({ kind: kind5 }));
+  }
+
+  // Guards of nodes, on the nodes and tokens both versions give the same kind and range.
+  let compared = 0;
+  for (const name of [
+    'edge-cases.ts',
+    'jsx.tsx',
+    'library/src/main.ts',
+    'library/src/types.ts',
+    'services/src/cjs.js',
+    'services/src/docs.ts',
+    'services/src/legacy.js',
+  ]) {
+    const fileName = join(root, 'tests/fixtures', name);
+    const text = readFileSync(fileName, 'utf8');
+    const file = api.parseSourceFile(fileName, text, { host: hostFor(root) });
+    const reference = ts5.createSourceFile(fileName, text, ts5.ScriptTarget.ESNext, true);
+    const nodes5 = new Map();
+    const stack5 = [reference];
+    while (stack5.length > 0) {
+      const node = stack5.pop();
+      nodes5.set(`${names5.get(node.kind)} ${node.pos} ${node.end}`, node);
+      stack5.push(...node.getChildren(reference));
+    }
+    const stack = [file];
+    while (stack.length > 0) {
+      const node = stack.pop();
+      stack.push(...api.getChildren(node, file));
+      const kindName = names.get(node.kind);
+      const node5 = nodes5.get(`${kindName} ${node.pos} ${node.end}`);
+      if (node5 === undefined || node.kind === SyntaxKind.SyntaxList) continue;
+      compared++;
+      for (const guard of guards)
+        if (!takesKind(guard) && guard !== 'hasInitializer')
+          compare(guard, kindName, api[guard](node), ts5[guard](node5));
+      // TypeScript 7's hasInitializer asks whether the node is of a kind that has an initializer, TypeScript 5's
+      // whether it has one; a property signature has one only in error.
+      compare(
+        'hasInitializer',
+        kindName,
+        api.hasInitializer(node),
+        'initializer' in node5 && !ts5.isPropertySignature(node5),
+      );
+      if (ts5.hasInitializer(node5)) compare('hasInitializer', kindName, api.hasInitializer(node), true);
+    }
+  }
+  assert.deepEqual(failures.slice(0, 20), []);
+  assert.ok(guards.length > 240, `${guards.length} guards`);
+  assert.ok(compared > 2000, `${compared} nodes compared`);
+});
+
 test('a program takes a file parse threads prepared only when the host gives the same text', { skip }, async () => {
   const api = await load('library/index.js');
   const { parallelParse, PreparedFile } = await load('compiler/parallel-parse.js');

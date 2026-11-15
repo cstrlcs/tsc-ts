@@ -2,64 +2,120 @@
 // TypeScript is Copyright Microsoft Corporation, licensed under Apache-2.0. Do not edit.
 
 import type {
+  AbstractKeyword,
+  AccessExpression,
+  AccessorDeclaration,
+  AccessorKeyword,
+  AdditiveOperator,
+  AdditiveOperatorOrHigher,
+  AnyImportSyntax,
+  ArrayBindingElement,
   ArrayBindingPattern,
+  ArrayDestructuringAssignment,
   ArrayLiteralExpression,
   ArrayTypeNode,
   ArrowFunction,
   AsExpression,
+  AssertKeyword,
+  AssertionExpression,
+  AssertsKeyword,
+  AssignmentOperator,
+  AssignmentOperatorOrHigher,
+  AssignmentOperatorToken,
+  AsteriskToken,
+  AsyncKeyword,
   AwaitExpression,
+  AwaitKeyword,
   BigIntLiteral,
   BinaryExpression,
+  BinaryOperator,
+  BinaryOperatorToken,
   BindingElement,
+  BindingName,
+  BitwiseOperator,
+  BitwiseOperatorOrHigher,
   Block,
+  BooleanLiteral,
+  BreakOrContinueStatement,
   BreakStatement,
   CallExpression,
+  CallLikeExpression,
+  CallOrNewExpression,
   CallSignatureDeclaration,
   CaseBlock,
   CaseClause,
+  CaseKeyword,
   CatchClause,
   ClassDeclaration,
   ClassExpression,
+  ClassLikeDeclaration,
   ClassStaticBlockDeclaration,
+  ColonToken,
+  CompoundAssignmentOperator,
   ComputedPropertyName,
   ConditionalExpression,
   ConditionalTypeNode,
+  ConstKeyword,
   ConstructSignatureDeclaration,
   ConstructorDeclaration,
   ConstructorTypeNode,
   ContinueStatement,
   DebuggerStatement,
+  DeclarationName,
+  DeclareKeyword,
   Decorator,
   DefaultClause,
+  DefaultKeyword,
   DeleteExpression,
+  DestructuringAssignment,
   DoStatement,
+  DotDotDotToken,
+  DotToken,
   ElementAccessExpression,
   EmptyStatement,
+  EndOfFile,
+  EntityName,
   EnumDeclaration,
   EnumMember,
+  EqualityOperator,
+  EqualityOperatorOrHigher,
+  EqualsGreaterThanToken,
+  EqualsToken,
+  ExclamationToken,
+  ExponentiationOperator,
   ExportAssignment,
   ExportDeclaration,
+  ExportKeyword,
   ExportSpecifier,
   ExpressionStatement,
   ExpressionWithTypeArguments,
   ExternalModuleReference,
+  FalseLiteral,
   ForInStatement,
   ForOfStatement,
   ForStatement,
+  FunctionBody,
   FunctionDeclaration,
   FunctionExpression,
+  FunctionLikeDeclaration,
   FunctionTypeNode,
   GetAccessorDeclaration,
   HeritageClause,
+  HeritageClauseElement,
   Identifier,
   IfStatement,
   ImportAttribute,
+  ImportAttributeName,
   ImportAttributes,
   ImportClause,
+  ImportClauseOrBindingPattern,
   ImportDeclaration,
   ImportEqualsDeclaration,
+  ImportExpression,
+  ImportPhaseModifierSyntaxKind,
   ImportSpecifier,
   ImportTypeNode,
+  InKeyword,
   IndexSignatureDeclaration,
   IndexedAccessTypeNode,
   InferTypeNode,
@@ -69,7 +125,9 @@ import type {
   JSDocAllType,
   JSDocAugmentsTag,
   JSDocCallbackTag,
+  JSDocComment,
   JSDocDeprecatedTag,
+  JSDocFullName,
   JSDocImplementsTag,
   JSDocImportTag,
   JSDocLink,
@@ -102,7 +160,11 @@ import type {
   JSDocUnknownTag,
   JSDocVariadicType,
   JsxAttribute,
+  JsxAttributeLike,
+  JsxAttributeName,
+  JsxAttributeValue,
   JsxAttributes,
+  JsxChild,
   JsxClosingElement,
   JsxClosingFragment,
   JsxElement,
@@ -111,20 +173,46 @@ import type {
   JsxNamespacedName,
   JsxOpeningElement,
   JsxOpeningFragment,
+  JsxOpeningLikeElement,
   JsxSelfClosingElement,
   JsxSpreadAttribute,
   JsxText,
+  JsxTokenSyntaxKind,
+  KeywordExpression,
+  KeywordExpressionSyntaxKind,
+  KeywordTypeNode,
+  KeywordTypeSyntaxKind,
   LabeledStatement,
+  LiteralExpression,
+  LiteralLikeNode,
+  LiteralToken,
   LiteralTypeNode,
+  LogicalOperator,
+  LogicalOperatorOrHigher,
+  LogicalOrCoalescingAssignmentOperator,
   MappedTypeNode,
+  MemberName,
   MetaProperty,
   MethodDeclaration,
   MethodSignatureDeclaration,
+  MinusToken,
   MissingDeclaration,
+  Modifier,
+  ModifierLike,
+  ModifierSyntaxKind,
   ModuleBlock,
+  ModuleBody,
   ModuleDeclaration,
+  ModuleExportName,
+  ModuleName,
+  ModuleReference,
+  MultiplicativeOperator,
+  MultiplicativeOperatorOrHigher,
+  NamedExportBindings,
   NamedExports,
+  NamedImportBindings,
   NamedImports,
+  NamedImportsOrExports,
   NamedTupleMember,
   NamespaceExport,
   NamespaceExportDeclaration,
@@ -135,34 +223,63 @@ import type {
   NonNullExpression,
   NotEmittedStatement,
   NotEmittedTypeElement,
+  NullLiteral,
   NumericLiteral,
+  NumericOrStringLikeLiteral,
   ObjectBindingPattern,
+  ObjectDestructuringAssignment,
+  ObjectLiteralElementLike,
   ObjectLiteralExpression,
+  ObjectLiteralLikeNode,
+  ObjectTypeDeclaration,
   OmittedExpression,
   OptionalTypeNode,
+  OutKeyword,
+  OverrideKeyword,
   ParameterDeclaration,
   ParenthesizedExpression,
   ParenthesizedTypeNode,
   PartiallyEmittedExpression,
+  PlusToken,
   PostfixUnaryExpression,
+  PostfixUnaryOperator,
   PrefixUnaryExpression,
+  PrefixUnaryOperator,
   PrivateIdentifier,
+  PrivateKeyword,
   PropertyAccessExpression,
   PropertyAssignment,
   PropertyDeclaration,
+  PropertyName,
+  PropertyNameLiteral,
   PropertySignatureDeclaration,
+  ProtectedKeyword,
+  PseudoLiteralSyntaxKind,
+  PseudoLiteralToken,
+  PublicKeyword,
   QualifiedName,
+  QuestionDotToken,
+  QuestionToken,
+  ReadonlyKeyword,
   RegularExpressionLiteral,
+  RelationalOperator,
+  RelationalOperatorOrHigher,
   RestTypeNode,
   ReturnStatement,
   SatisfiesExpression,
   SemicolonClassElement,
   SetAccessorDeclaration,
+  ShiftOperator,
+  ShiftOperatorOrHigher,
   ShorthandPropertyAssignment,
+  SignatureDeclaration,
   SourceFile,
   SpreadAssignment,
   SpreadElement,
+  StaticKeyword,
   StringLiteral,
+  StringLiteralLikeNode,
+  SuperExpression,
   SwitchStatement,
   SyntaxList,
   SyntheticExpression,
@@ -170,13 +287,21 @@ import type {
   TaggedTemplateExpression,
   TemplateExpression,
   TemplateHead,
+  TemplateLiteral,
+  TemplateLiteralLikeNode,
+  TemplateLiteralToken,
   TemplateLiteralTypeNode,
   TemplateLiteralTypeSpan,
   TemplateMiddle,
+  TemplateMiddleOrTail,
   TemplateSpan,
   TemplateTail,
+  ThisExpression,
   ThisTypeNode,
   ThrowStatement,
+  Token,
+  TriviaSyntaxKind,
+  TrueLiteral,
   TryStatement,
   TupleTypeNode,
   TypeAliasDeclaration,
@@ -186,11 +311,15 @@ import type {
   TypeOperatorNode,
   TypeParameterDeclaration,
   TypePredicateNode,
+  TypePredicateParameterName,
   TypeQueryNode,
   TypeReferenceNode,
+  UnionOrIntersectionTypeNode,
   UnionTypeNode,
   VariableDeclaration,
   VariableDeclarationList,
+  VariableOrParameterDeclaration,
+  VariableOrPropertyDeclaration,
   VariableStatement,
   VoidExpression,
   WhileStatement,
@@ -198,6 +327,10 @@ import type {
   YieldExpression,
 } from './ast.js';
 import { SyntaxKind } from './enums.generated.js';
+
+export function isToken(node: Node): node is Token {
+  return isTokenKind(node.kind);
+}
 
 export function isIdentifier(node: Node): node is Identifier {
   return node.kind === SyntaxKind.Identifier;
@@ -447,6 +580,10 @@ export function isOmittedExpression(node: Node): node is OmittedExpression {
   return node.kind === SyntaxKind.OmittedExpression;
 }
 
+export function isKeywordExpression(node: Node): node is KeywordExpression {
+  return isKeywordExpressionKind(node.kind);
+}
+
 export function isStringLiteral(node: Node): node is StringLiteral {
   return node.kind === SyntaxKind.StringLiteral;
 }
@@ -585,6 +722,10 @@ export function isAwaitExpression(node: Node): node is AwaitExpression {
 
 export function isTypeAssertion(node: Node): node is TypeAssertion {
   return node.kind === SyntaxKind.TypeAssertionExpression;
+}
+
+export function isKeywordTypeNode(node: Node): node is KeywordTypeNode {
+  return isKeywordTypeKind(node.kind);
 }
 
 export function isUnionTypeNode(node: Node): node is UnionTypeNode {
@@ -969,4 +1110,770 @@ export function isJSDocParameterTag(node: Node): node is JSDocParameterTag {
 
 export function isJSDocPropertyTag(node: Node): node is JSDocPropertyTag {
   return node.kind === SyntaxKind.JSDocPropertyTag;
+}
+
+export function isHeritageClauseElement(node: Node): node is HeritageClauseElement {
+  return node.kind === SyntaxKind.ExpressionWithTypeArguments || node.kind === SyntaxKind.TypeReference;
+}
+
+export function isAccessExpression(node: Node): node is AccessExpression {
+  return node.kind === SyntaxKind.PropertyAccessExpression || node.kind === SyntaxKind.ElementAccessExpression;
+}
+
+export function isDeclarationName(node: Node): node is DeclarationName {
+  return (
+    node.kind === SyntaxKind.Identifier ||
+    node.kind === SyntaxKind.PrivateIdentifier ||
+    node.kind === SyntaxKind.StringLiteral ||
+    node.kind === SyntaxKind.NumericLiteral ||
+    node.kind === SyntaxKind.BigIntLiteral ||
+    node.kind === SyntaxKind.NoSubstitutionTemplateLiteral ||
+    node.kind === SyntaxKind.ComputedPropertyName ||
+    node.kind === SyntaxKind.ObjectBindingPattern ||
+    node.kind === SyntaxKind.ArrayBindingPattern ||
+    node.kind === SyntaxKind.PropertyAccessExpression ||
+    node.kind === SyntaxKind.ElementAccessExpression
+  );
+}
+
+export function isModuleName(node: Node): node is ModuleName {
+  return node.kind === SyntaxKind.Identifier || node.kind === SyntaxKind.StringLiteral;
+}
+
+export function isModuleExportName(node: Node): node is ModuleExportName {
+  return node.kind === SyntaxKind.Identifier || node.kind === SyntaxKind.StringLiteral;
+}
+
+export function isPropertyName(node: Node): node is PropertyName {
+  return (
+    node.kind === SyntaxKind.Identifier ||
+    node.kind === SyntaxKind.StringLiteral ||
+    node.kind === SyntaxKind.NoSubstitutionTemplateLiteral ||
+    node.kind === SyntaxKind.NumericLiteral ||
+    node.kind === SyntaxKind.ComputedPropertyName ||
+    node.kind === SyntaxKind.PrivateIdentifier ||
+    node.kind === SyntaxKind.BigIntLiteral
+  );
+}
+
+export function isModuleBody(node: Node): node is ModuleBody {
+  return node.kind === SyntaxKind.ModuleBlock || node.kind === SyntaxKind.ModuleDeclaration;
+}
+
+export function isJSDocFullName(node: Node): node is JSDocFullName {
+  return node.kind === SyntaxKind.Identifier || node.kind === SyntaxKind.ModuleDeclaration;
+}
+
+export function isModuleReference(node: Node): node is ModuleReference {
+  return (
+    node.kind === SyntaxKind.Identifier ||
+    node.kind === SyntaxKind.QualifiedName ||
+    node.kind === SyntaxKind.ExternalModuleReference
+  );
+}
+
+export function isNamedImportBindings(node: Node): node is NamedImportBindings {
+  return node.kind === SyntaxKind.NamespaceImport || node.kind === SyntaxKind.NamedImports;
+}
+
+export function isNamedExportBindings(node: Node): node is NamedExportBindings {
+  return node.kind === SyntaxKind.NamespaceExport || node.kind === SyntaxKind.NamedExports;
+}
+
+export function isMemberName(node: Node): node is MemberName {
+  return node.kind === SyntaxKind.Identifier || node.kind === SyntaxKind.PrivateIdentifier;
+}
+
+export function isEntityName(node: Node): node is EntityName {
+  return node.kind === SyntaxKind.Identifier || node.kind === SyntaxKind.QualifiedName;
+}
+
+export function isBindingName(node: Node): node is BindingName {
+  return (
+    node.kind === SyntaxKind.Identifier ||
+    node.kind === SyntaxKind.ObjectBindingPattern ||
+    node.kind === SyntaxKind.ArrayBindingPattern
+  );
+}
+
+export function isModifierLike(node: Node): node is ModifierLike {
+  return (
+    node.kind === SyntaxKind.AbstractKeyword ||
+    node.kind === SyntaxKind.AccessorKeyword ||
+    node.kind === SyntaxKind.AsyncKeyword ||
+    node.kind === SyntaxKind.ConstKeyword ||
+    node.kind === SyntaxKind.DeclareKeyword ||
+    node.kind === SyntaxKind.DefaultKeyword ||
+    node.kind === SyntaxKind.ExportKeyword ||
+    node.kind === SyntaxKind.InKeyword ||
+    node.kind === SyntaxKind.PrivateKeyword ||
+    node.kind === SyntaxKind.ProtectedKeyword ||
+    node.kind === SyntaxKind.PublicKeyword ||
+    node.kind === SyntaxKind.ReadonlyKeyword ||
+    node.kind === SyntaxKind.OutKeyword ||
+    node.kind === SyntaxKind.OverrideKeyword ||
+    node.kind === SyntaxKind.StaticKeyword ||
+    node.kind === SyntaxKind.Decorator
+  );
+}
+
+export function isJsxChild(node: Node): node is JsxChild {
+  return (
+    node.kind === SyntaxKind.JsxText ||
+    node.kind === SyntaxKind.JsxExpression ||
+    node.kind === SyntaxKind.JsxElement ||
+    node.kind === SyntaxKind.JsxSelfClosingElement ||
+    node.kind === SyntaxKind.JsxFragment
+  );
+}
+
+export function isJsxAttributeLike(node: Node): node is JsxAttributeLike {
+  return node.kind === SyntaxKind.JsxAttribute || node.kind === SyntaxKind.JsxSpreadAttribute;
+}
+
+export function isJsxAttributeName(node: Node): node is JsxAttributeName {
+  return node.kind === SyntaxKind.Identifier || node.kind === SyntaxKind.JsxNamespacedName;
+}
+
+export function isJsxAttributeValue(node: Node): node is JsxAttributeValue {
+  return (
+    node.kind === SyntaxKind.StringLiteral ||
+    node.kind === SyntaxKind.JsxExpression ||
+    node.kind === SyntaxKind.JsxElement ||
+    node.kind === SyntaxKind.JsxSelfClosingElement ||
+    node.kind === SyntaxKind.JsxFragment
+  );
+}
+
+export function isClassLikeDeclaration(node: Node): node is ClassLikeDeclaration {
+  return node.kind === SyntaxKind.ClassDeclaration || node.kind === SyntaxKind.ClassExpression;
+}
+
+export function isAccessorDeclaration(node: Node): node is AccessorDeclaration {
+  return node.kind === SyntaxKind.GetAccessor || node.kind === SyntaxKind.SetAccessor;
+}
+
+export function isLiteralLikeNode(node: Node): node is LiteralLikeNode {
+  return (
+    node.kind === SyntaxKind.StringLiteral ||
+    node.kind === SyntaxKind.NumericLiteral ||
+    node.kind === SyntaxKind.BigIntLiteral ||
+    node.kind === SyntaxKind.RegularExpressionLiteral ||
+    node.kind === SyntaxKind.TemplateHead ||
+    node.kind === SyntaxKind.TemplateMiddle ||
+    node.kind === SyntaxKind.TemplateTail ||
+    node.kind === SyntaxKind.JsxText
+  );
+}
+
+export function isLiteralExpression(node: Node): node is LiteralExpression {
+  return (
+    node.kind === SyntaxKind.StringLiteral ||
+    node.kind === SyntaxKind.NumericLiteral ||
+    node.kind === SyntaxKind.BigIntLiteral ||
+    node.kind === SyntaxKind.RegularExpressionLiteral ||
+    node.kind === SyntaxKind.NoSubstitutionTemplateLiteral
+  );
+}
+
+export function isUnionOrIntersectionTypeNode(node: Node): node is UnionOrIntersectionTypeNode {
+  return node.kind === SyntaxKind.UnionType || node.kind === SyntaxKind.IntersectionType;
+}
+
+export function isTemplateLiteralLikeNode(node: Node): node is TemplateLiteralLikeNode {
+  return isPseudoLiteralKind(node.kind);
+}
+
+export function isTemplateMiddleOrTail(node: Node): node is TemplateMiddleOrTail {
+  return node.kind === SyntaxKind.TemplateMiddle || node.kind === SyntaxKind.TemplateTail;
+}
+
+export function isTemplateLiteral(node: Node): node is TemplateLiteral {
+  return node.kind === SyntaxKind.TemplateExpression || node.kind === SyntaxKind.NoSubstitutionTemplateLiteral;
+}
+
+export function isTypePredicateParameterName(node: Node): node is TypePredicateParameterName {
+  return node.kind === SyntaxKind.Identifier || node.kind === SyntaxKind.ThisType;
+}
+
+export function isImportAttributeName(node: Node): node is ImportAttributeName {
+  return node.kind === SyntaxKind.Identifier || node.kind === SyntaxKind.StringLiteral;
+}
+
+export function isJSDocComment(node: Node): node is JSDocComment {
+  return (
+    node.kind === SyntaxKind.JSDocText ||
+    node.kind === SyntaxKind.JSDocLink ||
+    node.kind === SyntaxKind.JSDocLinkCode ||
+    node.kind === SyntaxKind.JSDocLinkPlain
+  );
+}
+
+export function isSignatureDeclaration(node: Node): node is SignatureDeclaration {
+  return (
+    node.kind === SyntaxKind.CallSignature ||
+    node.kind === SyntaxKind.ConstructSignature ||
+    node.kind === SyntaxKind.MethodSignature ||
+    node.kind === SyntaxKind.IndexSignature ||
+    node.kind === SyntaxKind.FunctionType ||
+    node.kind === SyntaxKind.ConstructorType ||
+    node.kind === SyntaxKind.FunctionDeclaration ||
+    node.kind === SyntaxKind.MethodDeclaration ||
+    node.kind === SyntaxKind.Constructor ||
+    node.kind === SyntaxKind.GetAccessor ||
+    node.kind === SyntaxKind.SetAccessor ||
+    node.kind === SyntaxKind.FunctionExpression ||
+    node.kind === SyntaxKind.ArrowFunction
+  );
+}
+
+export function isStringLiteralLikeNode(node: Node): node is StringLiteralLikeNode {
+  return node.kind === SyntaxKind.StringLiteral || node.kind === SyntaxKind.NoSubstitutionTemplateLiteral;
+}
+
+export function isNumericOrStringLikeLiteral(node: Node): node is NumericOrStringLikeLiteral {
+  return (
+    node.kind === SyntaxKind.StringLiteral ||
+    node.kind === SyntaxKind.NoSubstitutionTemplateLiteral ||
+    node.kind === SyntaxKind.NumericLiteral
+  );
+}
+
+export function isObjectLiteralLikeNode(node: Node): node is ObjectLiteralLikeNode {
+  return node.kind === SyntaxKind.ObjectLiteralExpression || node.kind === SyntaxKind.ObjectBindingPattern;
+}
+
+export function isObjectTypeDeclaration(node: Node): node is ObjectTypeDeclaration {
+  return (
+    node.kind === SyntaxKind.ClassDeclaration ||
+    node.kind === SyntaxKind.ClassExpression ||
+    node.kind === SyntaxKind.InterfaceDeclaration ||
+    node.kind === SyntaxKind.TypeLiteral
+  );
+}
+
+export function isJsxOpeningLikeElement(node: Node): node is JsxOpeningLikeElement {
+  return node.kind === SyntaxKind.JsxOpeningElement || node.kind === SyntaxKind.JsxSelfClosingElement;
+}
+
+export function isNamedImportsOrExports(node: Node): node is NamedImportsOrExports {
+  return node.kind === SyntaxKind.NamedImports || node.kind === SyntaxKind.NamedExports;
+}
+
+export function isBreakOrContinueStatement(node: Node): node is BreakOrContinueStatement {
+  return node.kind === SyntaxKind.BreakStatement || node.kind === SyntaxKind.ContinueStatement;
+}
+
+export function isCallLikeExpression(node: Node): node is CallLikeExpression {
+  return (
+    node.kind === SyntaxKind.CallExpression ||
+    node.kind === SyntaxKind.NewExpression ||
+    node.kind === SyntaxKind.TaggedTemplateExpression ||
+    node.kind === SyntaxKind.Decorator ||
+    node.kind === SyntaxKind.JsxOpeningElement ||
+    node.kind === SyntaxKind.JsxSelfClosingElement ||
+    node.kind === SyntaxKind.BinaryExpression
+  );
+}
+
+export function isFunctionLikeDeclaration(node: Node): node is FunctionLikeDeclaration {
+  return (
+    node.kind === SyntaxKind.FunctionDeclaration ||
+    node.kind === SyntaxKind.MethodDeclaration ||
+    node.kind === SyntaxKind.GetAccessor ||
+    node.kind === SyntaxKind.SetAccessor ||
+    node.kind === SyntaxKind.Constructor ||
+    node.kind === SyntaxKind.FunctionExpression ||
+    node.kind === SyntaxKind.ArrowFunction
+  );
+}
+
+export function isVariableOrParameterDeclaration(node: Node): node is VariableOrParameterDeclaration {
+  return node.kind === SyntaxKind.VariableDeclaration || node.kind === SyntaxKind.Parameter;
+}
+
+export function isVariableOrPropertyDeclaration(node: Node): node is VariableOrPropertyDeclaration {
+  return node.kind === SyntaxKind.VariableDeclaration || node.kind === SyntaxKind.PropertyDeclaration;
+}
+
+export function isCallOrNewExpression(node: Node): node is CallOrNewExpression {
+  return node.kind === SyntaxKind.CallExpression || node.kind === SyntaxKind.NewExpression;
+}
+
+export function isImportClauseOrBindingPattern(node: Node): node is ImportClauseOrBindingPattern {
+  return (
+    node.kind === SyntaxKind.ImportClause ||
+    node.kind === SyntaxKind.ObjectBindingPattern ||
+    node.kind === SyntaxKind.ArrayBindingPattern
+  );
+}
+
+export function isAnyImportSyntax(node: Node): node is AnyImportSyntax {
+  return (
+    node.kind === SyntaxKind.ImportDeclaration ||
+    node.kind === SyntaxKind.JSImportDeclaration ||
+    node.kind === SyntaxKind.ImportEqualsDeclaration
+  );
+}
+
+export function isArrayBindingElement(node: Node): node is ArrayBindingElement {
+  return node.kind === SyntaxKind.BindingElement || node.kind === SyntaxKind.OmittedExpression;
+}
+
+export function isAssertionExpression(node: Node): node is AssertionExpression {
+  return node.kind === SyntaxKind.TypeAssertionExpression || node.kind === SyntaxKind.AsExpression;
+}
+
+export function isBooleanLiteral(node: Node): node is BooleanLiteral {
+  return node.kind === SyntaxKind.TrueKeyword || node.kind === SyntaxKind.FalseKeyword;
+}
+
+export function isDestructuringAssignment(node: Node): node is DestructuringAssignment {
+  return node.kind === SyntaxKind.BinaryExpression;
+}
+
+export function isLiteralToken(node: Node): node is LiteralToken {
+  return (
+    node.kind === SyntaxKind.NumericLiteral ||
+    node.kind === SyntaxKind.BigIntLiteral ||
+    node.kind === SyntaxKind.StringLiteral ||
+    node.kind === SyntaxKind.JsxText ||
+    node.kind === SyntaxKind.RegularExpressionLiteral ||
+    node.kind === SyntaxKind.NoSubstitutionTemplateLiteral
+  );
+}
+
+export function isModifier(node: Node): node is Modifier {
+  return isModifierKind(node.kind);
+}
+
+export function isObjectLiteralElementLike(node: Node): node is ObjectLiteralElementLike {
+  return (
+    node.kind === SyntaxKind.PropertyAssignment ||
+    node.kind === SyntaxKind.ShorthandPropertyAssignment ||
+    node.kind === SyntaxKind.SpreadAssignment ||
+    node.kind === SyntaxKind.MethodDeclaration ||
+    node.kind === SyntaxKind.GetAccessor ||
+    node.kind === SyntaxKind.SetAccessor
+  );
+}
+
+export function isPropertyNameLiteral(node: Node): node is PropertyNameLiteral {
+  return (
+    node.kind === SyntaxKind.Identifier ||
+    node.kind === SyntaxKind.StringLiteral ||
+    node.kind === SyntaxKind.NumericLiteral
+  );
+}
+
+export function isPseudoLiteralToken(node: Node): node is PseudoLiteralToken {
+  return isPseudoLiteralKind(node.kind);
+}
+
+export function isTemplateLiteralToken(node: Node): node is TemplateLiteralToken {
+  return (
+    node.kind === SyntaxKind.NoSubstitutionTemplateLiteral ||
+    node.kind === SyntaxKind.TemplateHead ||
+    node.kind === SyntaxKind.TemplateMiddle ||
+    node.kind === SyntaxKind.TemplateTail
+  );
+}
+
+export function isArrayDestructuringAssignment(node: Node): node is ArrayDestructuringAssignment {
+  return node.kind === SyntaxKind.BinaryExpression;
+}
+
+export function isObjectDestructuringAssignment(node: Node): node is ObjectDestructuringAssignment {
+  return node.kind === SyntaxKind.BinaryExpression;
+}
+
+export function isFunctionBody(node: Node): node is FunctionBody {
+  return node.kind === SyntaxKind.Block;
+}
+
+export function isTriviaKind(kind: SyntaxKind): kind is TriviaSyntaxKind {
+  return (
+    kind === SyntaxKind.SingleLineCommentTrivia ||
+    kind === SyntaxKind.MultiLineCommentTrivia ||
+    kind === SyntaxKind.NewLineTrivia ||
+    kind === SyntaxKind.WhitespaceTrivia ||
+    kind === SyntaxKind.ConflictMarkerTrivia
+  );
+}
+
+export function isPseudoLiteralKind(kind: SyntaxKind): kind is PseudoLiteralSyntaxKind {
+  return kind === SyntaxKind.TemplateHead || kind === SyntaxKind.TemplateMiddle || kind === SyntaxKind.TemplateTail;
+}
+
+export function isModifierKind(kind: SyntaxKind): kind is ModifierSyntaxKind {
+  return (
+    kind === SyntaxKind.AbstractKeyword ||
+    kind === SyntaxKind.AccessorKeyword ||
+    kind === SyntaxKind.AsyncKeyword ||
+    kind === SyntaxKind.ConstKeyword ||
+    kind === SyntaxKind.DeclareKeyword ||
+    kind === SyntaxKind.DefaultKeyword ||
+    kind === SyntaxKind.ExportKeyword ||
+    kind === SyntaxKind.InKeyword ||
+    kind === SyntaxKind.PrivateKeyword ||
+    kind === SyntaxKind.ProtectedKeyword ||
+    kind === SyntaxKind.PublicKeyword ||
+    kind === SyntaxKind.ReadonlyKeyword ||
+    kind === SyntaxKind.OutKeyword ||
+    kind === SyntaxKind.OverrideKeyword ||
+    kind === SyntaxKind.StaticKeyword
+  );
+}
+
+export function isKeywordTypeKind(kind: SyntaxKind): kind is KeywordTypeSyntaxKind {
+  return (
+    kind === SyntaxKind.AnyKeyword ||
+    kind === SyntaxKind.BigIntKeyword ||
+    kind === SyntaxKind.BooleanKeyword ||
+    kind === SyntaxKind.IntrinsicKeyword ||
+    kind === SyntaxKind.NeverKeyword ||
+    kind === SyntaxKind.NumberKeyword ||
+    kind === SyntaxKind.ObjectKeyword ||
+    kind === SyntaxKind.StringKeyword ||
+    kind === SyntaxKind.SymbolKeyword ||
+    kind === SyntaxKind.UndefinedKeyword ||
+    kind === SyntaxKind.UnknownKeyword ||
+    kind === SyntaxKind.VoidKeyword
+  );
+}
+
+export function isKeywordExpressionKind(kind: SyntaxKind): kind is KeywordExpressionSyntaxKind {
+  return (
+    kind === SyntaxKind.NullKeyword ||
+    kind === SyntaxKind.TrueKeyword ||
+    kind === SyntaxKind.FalseKeyword ||
+    kind === SyntaxKind.ThisKeyword ||
+    kind === SyntaxKind.SuperKeyword ||
+    kind === SyntaxKind.ImportKeyword
+  );
+}
+
+export function isJsxTokenKind(kind: SyntaxKind): kind is JsxTokenSyntaxKind {
+  return (
+    kind === SyntaxKind.LessThanSlashToken ||
+    kind === SyntaxKind.EndOfFile ||
+    kind === SyntaxKind.ConflictMarkerTrivia ||
+    kind === SyntaxKind.JsxText ||
+    kind === SyntaxKind.JsxTextAllWhiteSpaces ||
+    kind === SyntaxKind.OpenBraceToken ||
+    kind === SyntaxKind.LessThanToken
+  );
+}
+
+export function isImportPhaseModifierKind(kind: SyntaxKind): kind is ImportPhaseModifierSyntaxKind {
+  return kind === SyntaxKind.TypeKeyword || kind === SyntaxKind.DeferKeyword || kind === SyntaxKind.SourceKeyword;
+}
+
+export function isPostfixUnaryOperator(kind: SyntaxKind): kind is PostfixUnaryOperator {
+  return kind === SyntaxKind.PlusPlusToken || kind === SyntaxKind.MinusMinusToken;
+}
+
+export function isPrefixUnaryOperator(kind: SyntaxKind): kind is PrefixUnaryOperator {
+  return (
+    kind === SyntaxKind.PlusToken ||
+    kind === SyntaxKind.MinusToken ||
+    kind === SyntaxKind.TildeToken ||
+    kind === SyntaxKind.ExclamationToken ||
+    kind === SyntaxKind.PlusPlusToken ||
+    kind === SyntaxKind.MinusMinusToken
+  );
+}
+
+export function isAssignmentOperator(kind: SyntaxKind): kind is AssignmentOperator {
+  return kind === SyntaxKind.EqualsToken || isCompoundAssignmentOperator(kind);
+}
+
+export function isBinaryOperator(kind: SyntaxKind): kind is BinaryOperator {
+  return isAssignmentOperatorOrHigher(kind) || kind === SyntaxKind.CommaToken;
+}
+
+export function isExponentiationOperator(kind: SyntaxKind): kind is ExponentiationOperator {
+  return kind === SyntaxKind.AsteriskAsteriskToken;
+}
+
+export function isMultiplicativeOperator(kind: SyntaxKind): kind is MultiplicativeOperator {
+  return kind === SyntaxKind.AsteriskToken || kind === SyntaxKind.SlashToken || kind === SyntaxKind.PercentToken;
+}
+
+export function isMultiplicativeOperatorOrHigher(kind: SyntaxKind): kind is MultiplicativeOperatorOrHigher {
+  return isExponentiationOperator(kind) || isMultiplicativeOperator(kind);
+}
+
+export function isAdditiveOperator(kind: SyntaxKind): kind is AdditiveOperator {
+  return kind === SyntaxKind.PlusToken || kind === SyntaxKind.MinusToken;
+}
+
+export function isAdditiveOperatorOrHigher(kind: SyntaxKind): kind is AdditiveOperatorOrHigher {
+  return isMultiplicativeOperatorOrHigher(kind) || isAdditiveOperator(kind);
+}
+
+export function isShiftOperator(kind: SyntaxKind): kind is ShiftOperator {
+  return (
+    kind === SyntaxKind.LessThanLessThanToken ||
+    kind === SyntaxKind.GreaterThanGreaterThanToken ||
+    kind === SyntaxKind.GreaterThanGreaterThanGreaterThanToken
+  );
+}
+
+export function isShiftOperatorOrHigher(kind: SyntaxKind): kind is ShiftOperatorOrHigher {
+  return isAdditiveOperatorOrHigher(kind) || isShiftOperator(kind);
+}
+
+export function isRelationalOperator(kind: SyntaxKind): kind is RelationalOperator {
+  return (
+    kind === SyntaxKind.LessThanToken ||
+    kind === SyntaxKind.LessThanEqualsToken ||
+    kind === SyntaxKind.GreaterThanToken ||
+    kind === SyntaxKind.GreaterThanEqualsToken ||
+    kind === SyntaxKind.InstanceOfKeyword ||
+    kind === SyntaxKind.InKeyword
+  );
+}
+
+export function isRelationalOperatorOrHigher(kind: SyntaxKind): kind is RelationalOperatorOrHigher {
+  return isShiftOperatorOrHigher(kind) || isRelationalOperator(kind);
+}
+
+export function isEqualityOperator(kind: SyntaxKind): kind is EqualityOperator {
+  return (
+    kind === SyntaxKind.EqualsEqualsToken ||
+    kind === SyntaxKind.EqualsEqualsEqualsToken ||
+    kind === SyntaxKind.ExclamationEqualsEqualsToken ||
+    kind === SyntaxKind.ExclamationEqualsToken
+  );
+}
+
+export function isEqualityOperatorOrHigher(kind: SyntaxKind): kind is EqualityOperatorOrHigher {
+  return isRelationalOperatorOrHigher(kind) || isEqualityOperator(kind);
+}
+
+export function isBitwiseOperator(kind: SyntaxKind): kind is BitwiseOperator {
+  return kind === SyntaxKind.AmpersandToken || kind === SyntaxKind.BarToken || kind === SyntaxKind.CaretToken;
+}
+
+export function isBitwiseOperatorOrHigher(kind: SyntaxKind): kind is BitwiseOperatorOrHigher {
+  return isEqualityOperatorOrHigher(kind) || isBitwiseOperator(kind);
+}
+
+export function isLogicalOperator(kind: SyntaxKind): kind is LogicalOperator {
+  return kind === SyntaxKind.AmpersandAmpersandToken || kind === SyntaxKind.BarBarToken;
+}
+
+export function isLogicalOperatorOrHigher(kind: SyntaxKind): kind is LogicalOperatorOrHigher {
+  return isBitwiseOperatorOrHigher(kind) || isLogicalOperator(kind);
+}
+
+export function isCompoundAssignmentOperator(kind: SyntaxKind): kind is CompoundAssignmentOperator {
+  return (
+    kind === SyntaxKind.PlusEqualsToken ||
+    kind === SyntaxKind.MinusEqualsToken ||
+    kind === SyntaxKind.AsteriskAsteriskEqualsToken ||
+    kind === SyntaxKind.AsteriskEqualsToken ||
+    kind === SyntaxKind.SlashEqualsToken ||
+    kind === SyntaxKind.PercentEqualsToken ||
+    kind === SyntaxKind.AmpersandEqualsToken ||
+    kind === SyntaxKind.BarEqualsToken ||
+    kind === SyntaxKind.CaretEqualsToken ||
+    kind === SyntaxKind.LessThanLessThanEqualsToken ||
+    kind === SyntaxKind.GreaterThanGreaterThanGreaterThanEqualsToken ||
+    kind === SyntaxKind.GreaterThanGreaterThanEqualsToken ||
+    kind === SyntaxKind.BarBarEqualsToken ||
+    kind === SyntaxKind.AmpersandAmpersandEqualsToken ||
+    kind === SyntaxKind.QuestionQuestionEqualsToken
+  );
+}
+
+export function isAssignmentOperatorOrHigher(kind: SyntaxKind): kind is AssignmentOperatorOrHigher {
+  return kind === SyntaxKind.QuestionQuestionToken || isLogicalOperatorOrHigher(kind) || isAssignmentOperator(kind);
+}
+
+export function isLogicalOrCoalescingAssignmentOperator(
+  kind: SyntaxKind,
+): kind is LogicalOrCoalescingAssignmentOperator {
+  return (
+    kind === SyntaxKind.AmpersandAmpersandEqualsToken ||
+    kind === SyntaxKind.BarBarEqualsToken ||
+    kind === SyntaxKind.QuestionQuestionEqualsToken
+  );
+}
+
+export function isLiteralKind(kind: SyntaxKind): boolean {
+  return kind >= SyntaxKind.FirstLiteralToken && kind <= SyntaxKind.LastLiteralToken;
+}
+
+export function isPunctuationKind(kind: SyntaxKind): boolean {
+  return kind >= SyntaxKind.FirstPunctuation && kind <= SyntaxKind.LastPunctuation;
+}
+
+export function isKeywordKind(kind: SyntaxKind): boolean {
+  return kind >= SyntaxKind.FirstKeyword && kind <= SyntaxKind.LastKeyword;
+}
+
+export function isTokenKind(kind: SyntaxKind): boolean {
+  return kind >= SyntaxKind.FirstToken && kind <= SyntaxKind.LastToken;
+}
+
+export function isJSDocNodeKind(kind: SyntaxKind): boolean {
+  return kind >= SyntaxKind.FirstJSDocNode && kind <= SyntaxKind.LastJSDocNode;
+}
+
+export function isEndOfFile(node: Node): node is EndOfFile {
+  return node.kind === SyntaxKind.EndOfFile;
+}
+
+export function isDotToken(node: Node): node is DotToken {
+  return node.kind === SyntaxKind.DotToken;
+}
+
+export function isDotDotDotToken(node: Node): node is DotDotDotToken {
+  return node.kind === SyntaxKind.DotDotDotToken;
+}
+
+export function isQuestionToken(node: Node): node is QuestionToken {
+  return node.kind === SyntaxKind.QuestionToken;
+}
+
+export function isExclamationToken(node: Node): node is ExclamationToken {
+  return node.kind === SyntaxKind.ExclamationToken;
+}
+
+export function isColonToken(node: Node): node is ColonToken {
+  return node.kind === SyntaxKind.ColonToken;
+}
+
+export function isEqualsToken(node: Node): node is EqualsToken {
+  return node.kind === SyntaxKind.EqualsToken;
+}
+
+export function isAsteriskToken(node: Node): node is AsteriskToken {
+  return node.kind === SyntaxKind.AsteriskToken;
+}
+
+export function isEqualsGreaterThanToken(node: Node): node is EqualsGreaterThanToken {
+  return node.kind === SyntaxKind.EqualsGreaterThanToken;
+}
+
+export function isPlusToken(node: Node): node is PlusToken {
+  return node.kind === SyntaxKind.PlusToken;
+}
+
+export function isMinusToken(node: Node): node is MinusToken {
+  return node.kind === SyntaxKind.MinusToken;
+}
+
+export function isQuestionDotToken(node: Node): node is QuestionDotToken {
+  return node.kind === SyntaxKind.QuestionDotToken;
+}
+
+export function isAssertsKeyword(node: Node): node is AssertsKeyword {
+  return node.kind === SyntaxKind.AssertsKeyword;
+}
+
+export function isAssertKeyword(node: Node): node is AssertKeyword {
+  return node.kind === SyntaxKind.AssertKeyword;
+}
+
+export function isAwaitKeyword(node: Node): node is AwaitKeyword {
+  return node.kind === SyntaxKind.AwaitKeyword;
+}
+
+export function isCaseKeyword(node: Node): node is CaseKeyword {
+  return node.kind === SyntaxKind.CaseKeyword;
+}
+
+export function isAbstractKeyword(node: Node): node is AbstractKeyword {
+  return node.kind === SyntaxKind.AbstractKeyword;
+}
+
+export function isAccessorKeyword(node: Node): node is AccessorKeyword {
+  return node.kind === SyntaxKind.AccessorKeyword;
+}
+
+export function isAsyncKeyword(node: Node): node is AsyncKeyword {
+  return node.kind === SyntaxKind.AsyncKeyword;
+}
+
+export function isConstKeyword(node: Node): node is ConstKeyword {
+  return node.kind === SyntaxKind.ConstKeyword;
+}
+
+export function isDeclareKeyword(node: Node): node is DeclareKeyword {
+  return node.kind === SyntaxKind.DeclareKeyword;
+}
+
+export function isDefaultKeyword(node: Node): node is DefaultKeyword {
+  return node.kind === SyntaxKind.DefaultKeyword;
+}
+
+export function isExportKeyword(node: Node): node is ExportKeyword {
+  return node.kind === SyntaxKind.ExportKeyword;
+}
+
+export function isInKeyword(node: Node): node is InKeyword {
+  return node.kind === SyntaxKind.InKeyword;
+}
+
+export function isPrivateKeyword(node: Node): node is PrivateKeyword {
+  return node.kind === SyntaxKind.PrivateKeyword;
+}
+
+export function isProtectedKeyword(node: Node): node is ProtectedKeyword {
+  return node.kind === SyntaxKind.ProtectedKeyword;
+}
+
+export function isPublicKeyword(node: Node): node is PublicKeyword {
+  return node.kind === SyntaxKind.PublicKeyword;
+}
+
+export function isReadonlyKeyword(node: Node): node is ReadonlyKeyword {
+  return node.kind === SyntaxKind.ReadonlyKeyword;
+}
+
+export function isOutKeyword(node: Node): node is OutKeyword {
+  return node.kind === SyntaxKind.OutKeyword;
+}
+
+export function isOverrideKeyword(node: Node): node is OverrideKeyword {
+  return node.kind === SyntaxKind.OverrideKeyword;
+}
+
+export function isStaticKeyword(node: Node): node is StaticKeyword {
+  return node.kind === SyntaxKind.StaticKeyword;
+}
+
+export function isBinaryOperatorToken(node: Node): node is BinaryOperatorToken {
+  return isBinaryOperator(node.kind);
+}
+
+export function isAssignmentOperatorToken(node: Node): node is AssignmentOperatorToken {
+  return isAssignmentOperator(node.kind);
+}
+
+export function isNullLiteral(node: Node): node is NullLiteral {
+  return node.kind === SyntaxKind.NullKeyword;
+}
+
+export function isTrueLiteral(node: Node): node is TrueLiteral {
+  return node.kind === SyntaxKind.TrueKeyword;
+}
+
+export function isFalseLiteral(node: Node): node is FalseLiteral {
+  return node.kind === SyntaxKind.FalseKeyword;
+}
+
+export function isThisExpression(node: Node): node is ThisExpression {
+  return node.kind === SyntaxKind.ThisKeyword;
+}
+
+export function isSuperExpression(node: Node): node is SuperExpression {
+  return node.kind === SyntaxKind.SuperKeyword;
+}
+
+export function isImportExpression(node: Node): node is ImportExpression {
+  return node.kind === SyntaxKind.ImportKeyword;
 }

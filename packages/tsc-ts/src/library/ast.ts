@@ -4,18 +4,28 @@
 // TypeScript 7's AST names. Lists are NodeList objects.
 
 import type {
+  BindingElement,
   EndOfFile,
   EntityName,
+  EnumMember,
+  ForInStatement,
+  ForOfStatement,
+  ForStatement,
   Identifier,
+  JsxAttribute,
   KeywordSyntaxKind,
   ModifierSyntaxKind,
   NoSubstitutionTemplateLiteral,
+  ParameterDeclaration,
   PropertyAccessExpression,
+  PropertyAssignment,
+  PropertyDeclaration,
   PunctuationSyntaxKind,
   Statement,
   StringLiteral,
   ThisExpression,
   Token,
+  VariableDeclaration,
 } from './ast.generated.js';
 import type { LanguageVariant, ModifierFlags, NodeFlags, ScriptKind, SyntaxKind } from './enums.generated.js';
 
@@ -100,5 +110,17 @@ export type EntityNameOrEntityNameExpression = EntityName | EntityNameExpression
 export interface JsxTagNamePropertyAccess extends PropertyAccessExpression {
   readonly expression: Identifier | ThisExpression | JsxTagNamePropertyAccess;
 }
+
+/** The nodes that have an `initializer` that is an expression. */
+export type HasExpressionInitializer =
+  | VariableDeclaration
+  | ParameterDeclaration
+  | BindingElement
+  | PropertyDeclaration
+  | PropertyAssignment
+  | EnumMember;
+
+/** The nodes that have an `initializer` (`hasInitializer`). */
+export type HasInitializer = HasExpressionInitializer | ForStatement | ForInStatement | ForOfStatement | JsxAttribute;
 
 export * from './ast.generated.js';

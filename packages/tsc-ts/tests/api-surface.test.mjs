@@ -2,7 +2,7 @@
 // public enums give tsc-ts's values for every member tsc-ts has, tsc-ts's nodes hold what their API
 // interfaces declare (scripts/generate-api.mjs): every required member, nothing in a member declared
 // undefined, one of the declared kinds in a member typed by kinds, and lists of NodeList shape with
-// parents set, and each node guard answers for the nodes of its interface.
+// parents set, and each type guard answers for the kinds of the type it narrows to.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -83,11 +83,11 @@ test('the public enums number kinds and flags as tsc-ts does', () => {
   assert.ok(compared > 750, `${compared} members compared`);
 });
 
-/**
- * The node interfaces tsc-ts/api exports that have one kind: the interface's name and type, its kind, and
- * whether it declares the kind itself or takes it from the interface it extends.
- */
-function nodeInterfaces(SyntaxKind) {
+let apiExports;
+
+/** A checker of tsc-ts/api's sources and the symbols the API exports. */
+function exportsOfApi() {
+  if (apiExports !== undefined) return apiExports;
   const index = join(root, 'src/library/index.ts');
   const program = ts.createProgram([index], {
     noEmit: true,
@@ -98,9 +98,20 @@ function nodeInterfaces(SyntaxKind) {
     types: [],
   });
   const checker = program.getTypeChecker();
+  const symbols = checker
+    .getExportsOfModule(checker.getSymbolAtLocation(program.getSourceFile(index)))
+    .map((exported) => (exported.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(exported) : exported));
+  return (apiExports = { checker, symbols });
+}
+
+/**
+ * The node interfaces tsc-ts/api exports that have one kind: the interface's name and type, its kind, and
+ * whether it declares the kind itself or takes it from the interface it extends.
+ */
+function nodeInterfaces(SyntaxKind) {
+  const { checker, symbols } = exportsOfApi();
   const interfaces = [];
-  for (const exported of checker.getExportsOfModule(checker.getSymbolAtLocation(program.getSourceFile(index)))) {
-    const symbol = exported.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(exported) : exported;
+  for (const symbol of symbols) {
     if ((symbol.flags & ts.SymbolFlags.Interface) === 0) continue;
     const type = checker.getDeclaredTypeOfSymbol(symbol);
     const kindProperty = type.getProperty('kind');
@@ -111,6 +122,26 @@ function nodeInterfaces(SyntaxKind) {
     interfaces.push({ name: symbol.name, type, kind: SyntaxKind[kindType.symbol.name], declaresKind });
   }
   return { checker, interfaces };
+}
+
+/**
+ * The type guards tsc-ts/api exports, by name: whether the guard takes a kind or a node, and the kinds of the
+ * type it narrows to (for a node type, the kinds its `kind` member has).
+ */
+function typeGuards() {
+  const { checker, symbols } = exportsOfApi();
+  const kindsOf = (type) => (type.isUnion() ? type.types.flatMap(kindsOf) : [type.value]);
+  const guards = new Map();
+  for (const symbol of symbols) {
+    if ((symbol.flags & ts.SymbolFlags.Function) === 0) continue;
+    const [signature] = checker.getSignaturesOfType(checker.getTypeOfSymbol(symbol), ts.SignatureKind.Call);
+    const predicate = checker.getTypePredicateOfSignature(signature);
+    if (predicate === undefined) continue;
+    const ofKind = predicate.parameterName === 'kind';
+    const type = ofKind ? predicate.type : checker.getTypeOfPropertyOfType(predicate.type, 'kind');
+    guards.set(symbol.name, { ofKind, kinds: new Set(kindsOf(type)) });
+  }
+  return guards;
 }
 
 /**
@@ -225,23 +256,34 @@ test(
 );
 
 test(
-  'each node guard answers for the nodes of its interface',
+  'each type guard answers for the kinds of the type it narrows to',
   { skip: noUpstream || (!existsSync(parserPath) && 'run npm run build') },
   async () => {
     const { parseSourceFile } = await import(pathToFileURL(parserPath).href);
     const api = await import(pathToFileURL(join(root, 'dist/tsc-ts/src/library/index.js')).href);
-    const guards = await import(pathToFileURL(join(root, 'dist/tsc-ts/src/library/is.generated.js')).href);
     const { SyntaxKind } = api;
-    // The kinds each guard answers for: the kind of its interface, and for import and type alias declarations
-    // also the kind of the declaration a JSDoc `@import` or `@typedef` makes, as TypeScript 7's guards do.
-    const jsDocForms = new Map([
-      ['ImportDeclaration', SyntaxKind.JSImportDeclaration],
-      ['TypeAliasDeclaration', SyntaxKind.JSTypeAliasDeclaration],
-    ]);
-    const kindsOfGuard = new Map();
+    const guards = typeGuards();
+    // The guards of Expression and TypeNode, which are any node to the type system, are compared with
+    // TypeScript 5's in api-library.test.mjs.
+    for (const name of ['isExpression', 'isTypeNode']) assert.ok(guards.delete(name), name);
+    assert.ok(guards.size > 320, `${guards.size} guards`);
+    // Every node interface that declares a kind has a guard of its name.
     for (const { name, kind, declaresKind } of nodeInterfaces(SyntaxKind).interfaces)
-      if (declaresKind) kindsOfGuard.set(`is${name}`, [kind, ...(jsDocForms.has(name) ? [jsDocForms.get(name)] : [])]);
-    assert.deepEqual(Object.keys(guards).sort(), [...kindsOfGuard.keys()].sort());
+      if (declaresKind) assert.deepEqual([...(guards.get(`is${name}`)?.kinds ?? [])], [kind], name);
+    // A guard that accepts import or type alias declarations also accepts the declarations a JSDoc `@import`
+    // or `@typedef` makes, as TypeScript 7's guards do.
+    const declarationOfJSDocForm = new Map([
+      [SyntaxKind.JSImportDeclaration, SyntaxKind.ImportDeclaration],
+      [SyntaxKind.JSTypeAliasDeclaration, SyntaxKind.TypeAliasDeclaration],
+    ]);
+    // The guards of a range of kinds, which answer a boolean.
+    const ranges = [
+      ['isLiteralKind', SyntaxKind.FirstLiteralToken, SyntaxKind.LastLiteralToken],
+      ['isPunctuationKind', SyntaxKind.FirstPunctuation, SyntaxKind.LastPunctuation],
+      ['isKeywordKind', SyntaxKind.FirstKeyword, SyntaxKind.LastKeyword],
+      ['isTokenKind', SyntaxKind.FirstToken, SyntaxKind.LastToken],
+      ['isJSDocNodeKind', SyntaxKind.FirstJSDocNode, SyntaxKind.LastJSDocNode],
+    ];
 
     // A node of each kind in every 25th test case, tokens, lists and JSDoc included.
     const files = [];
@@ -270,8 +312,12 @@ test(
     for (const kind of kinds) {
       // A kind the parser never makes is tried on an object of that kind.
       const node = nodeOfKind.get(kind) ?? { kind };
-      for (const [name, guard] of Object.entries(guards))
-        if (guard(node) !== kindsOfGuard.get(name).includes(kind)) failures.push(`${name}(${SyntaxKind[kind]})`);
+      for (const [name, guard] of guards) {
+        const expected = guard.kinds.has(kind) || guard.kinds.has(declarationOfJSDocForm.get(kind));
+        if (api[name](guard.ofKind ? kind : node) !== expected) failures.push(`${name}(${SyntaxKind[kind]})`);
+      }
+      for (const [name, first, last] of ranges)
+        if (api[name](kind) !== (kind >= first && kind <= last)) failures.push(`${name}(${SyntaxKind[kind]})`);
     }
     assert.deepEqual(failures, []);
   },

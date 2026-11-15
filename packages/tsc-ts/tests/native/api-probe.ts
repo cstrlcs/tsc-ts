@@ -17,11 +17,19 @@ import {
   getSourceFileOfNode,
   getTextOfNode,
   getTrailingCommentRanges,
+  hasInitializer,
   InternalCompilerError,
+  isAssignmentOperator,
   isCallExpression,
+  isClassLikeDeclaration,
+  isExpression,
+  isFunctionLikeDeclaration,
   isIdentifier,
   isImportDeclaration,
+  isModifier,
   isPropertyAccessExpression,
+  isTokenKind,
+  isTypeNode,
   isVariableDeclaration,
   type Node,
   parseSourceFile,
@@ -114,6 +122,12 @@ function probe(program: Program, checker: TypeChecker): void {
       if (isPropertyAccessExpression(node)) print(`  property access ${nodeText(node.name)}`);
       if (isVariableDeclaration(node)) print(`  variable ${nodeText(node.name)} ${nodeText(node.initializer)}`);
       if (isImportDeclaration(node)) print(`  import ${nodeText(node.moduleSpecifier)}`);
+      if (isClassLikeDeclaration(node)) print(`  class ${nodeText(node.name)} ${node.members.nodes.length}`);
+      if (isFunctionLikeDeclaration(node)) print(`  function ${node.parameters.nodes.length} ${nodeText(node.body)}`);
+      if (hasInitializer(node)) print(`  initializer ${nodeText(node.initializer)}`);
+      print(
+        `  guards ${isExpression(node)} ${isTypeNode(node)} ${isModifier(node)} ${isTokenKind(node.kind)} ${isAssignmentOperator(node.kind)}`,
+      );
       print(`  children ${childrenText(node)}`);
       print(`  tokens ${nodeText(getFirstToken(node))} ${nodeText(getLastToken(node, file))}`);
       print(`  type ${keep(checker.getTypeAtLocation(node))}`);
