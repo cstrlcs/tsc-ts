@@ -665,8 +665,31 @@ function optionValue(declaration, raw) {
 }
 
 /**
+ * Runs of test cases that tsc-ts answers differently from tsgo: the cases, the argument their differing runs
+ * have, and what the differences the test finds must match. The comment of each entry gives the reason.
+ */
+const differingRuns = [
+  // The 25 content mapper cases: tsc-ts does not read `contentMappers`, so it does not report TS18068 (content
+  // mappers need --runExternalCode) on the config's `contentMappers`, and exits with 0 where that is the only error.
+  {
+    name: /^compiler\/contentMapper/,
+    arg: '--listFilesOnly',
+    difference:
+      /^stdout line \d+: tsgo "[^"]*: error TS18068: [^"]*", ours (undefined|"[^"]*")(\nstatus tsgo 1, ours 0)?$/,
+  },
+  // tsc-ts leaves a config file's `compileOnSave` out of what --showConfig prints: the `]` that closes `exclude`
+  // is followed by `"compileOnSave": true` in tsgo's.
+  {
+    name: /^compiler\/maxNodeModuleJsDepthDefaultsToZero\.ts$/,
+    arg: '--showConfig',
+    difference: /^stdout line 13: tsgo " {4}\],", ours " {4}\]"$/,
+  },
+];
+
+/**
  * Projects from TypeScript's multi-file test cases. Cases with a tsconfig.json are run with it; others get one with
- * their `@option` headers and every source file in `files`.
+ * their `@option` headers and every source file in `files`. A project with `differsFromTsgo` expects its runs with
+ * that entry's argument to differ from tsgo's as the entry says (see `differingRuns`).
  */
 export function testCaseProjects(testsRoot, declarations) {
   const byName = new Map();
@@ -710,12 +733,13 @@ export function testCaseProjects(testsRoot, declarations) {
     const projectCwd = toProjectPath('.', cwd);
     const name = testFile.slice(testsRoot.length + 1);
     if (configFile !== undefined) {
-      const project = ['-p', configFile];
+      const project = ['-p', relativeTo(projectCwd, configFile)];
       projects.push({
         name,
         files,
         symlinks,
         cwd: projectCwd,
+        differsFromTsgo: differingRuns.find((differing) => differing.name.test(name)),
         args: [
           [...project, '--listFilesOnly'],
           [...project, '--explainFiles', '--listFilesOnly'],

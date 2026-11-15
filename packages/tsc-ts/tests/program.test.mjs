@@ -1,6 +1,7 @@
 // Compares tsconfig.json handling and program construction with tsgo (packages/tsgo/dist/tsgo): fixture projects
 // and projects from TypeScript's test cases, run with --listFilesOnly, --explainFiles, --showConfig and
-// --traceResolution. stdout, stderr and exit status must match exactly.
+// --traceResolution. stdout, stderr and exit status must match exactly, except in the runs program-cases.mjs lists as
+// differing from tsgo, which must differ as listed.
 // Set TSC_TS_CLI to a native build of src/drivers/cli.ts to test it instead of the JS build, PROGRAM_FILTER to
 // a substring of project names to run only those, and PROGRAM_SHARD to `i/n` to run every nth run starting at the ith.
 import { test } from 'node:test';
@@ -92,7 +93,7 @@ async function compare(projects) {
     runs = runs.filter((_, i) => i % count === index - 1);
     projects = [...new Set(runs.map((r) => r.project))];
   }
-  const counts = { projects: projects.length, runs: runs.length, matched: 0, seam: 0 };
+  const counts = { projects: projects.length, runs: runs.length, matched: 0, seam: 0, differing: 0 };
   const failures = [];
   const directories = new Map();
   await pool(runs, workers, async ({ project, args }) => {
@@ -109,6 +110,18 @@ async function compare(projects) {
     if (expected.stdout !== actual.stdout) problems.push('stdout ' + firstDifference(expected.stdout, actual.stdout));
     if (expected.stderr !== actual.stderr) problems.push('stderr ' + firstDifference(expected.stderr, actual.stderr));
     if (expected.status !== actual.status) problems.push(`status tsgo ${expected.status}, ours ${actual.status}`);
+    const differing = project.differsFromTsgo;
+    if (differing !== undefined && args.includes(differing.arg)) {
+      if (differing.difference.test(problems.join('\n'))) counts.differing++;
+      else if (problems.length === 0)
+        failures.push(`${project.name} ${JSON.stringify(args)}:\n    matches tsgo and is listed as differing`);
+      else
+        failures.push(
+          `${project.name} ${JSON.stringify(args)}:\n    differs from tsgo in another way than listed\n    ` +
+            problems.join('\n    '),
+        );
+      return;
+    }
     if (problems.length === 0) counts.matched++;
     else failures.push(`${project.name} ${JSON.stringify(args)}:\n    ${problems.join('\n    ')}`);
   });
@@ -117,7 +130,10 @@ async function compare(projects) {
 
 async function check(t, name, projects) {
   const { counts, failures } = await compare(projects);
-  t.diagnostic(`${name}: ${counts.matched}/${counts.runs} runs match (${counts.projects} projects)`);
+  t.diagnostic(
+    `${name}: ${counts.matched}/${counts.runs - counts.differing} runs match (${counts.projects} projects), ` +
+      `${counts.differing} differ from tsgo as listed`,
+  );
   assert.deepEqual(failures.slice(0, 20), [], `${failures.length} mismatches`);
 }
 
