@@ -625,6 +625,226 @@ export function fixtureProjects() {
     'real/b.ts': '',
   });
   fixtures[fixtures.length - 1].symlinks = { linked: 'real', 'src/loop': '.' };
+
+  add('include-of-numbers', {
+    'tsconfig.json': '{ "include": [-0, 1.50, "nothing"], "exclude": [1e21] }\n',
+    'a.ts': 'export {};\n',
+  });
+
+  // ---- content mappers
+  // No file here has an extension a mapper registers, so no mapper runs with --runExternalCode.
+  const mapperArgs = [
+    ['--listFilesOnly'],
+    ['--listFilesOnly', '--runExternalCode'],
+    ['--explainFiles', '--listFilesOnly', '--runExternalCode'],
+    ['--showConfig', '--runExternalCode'],
+  ];
+  const mapperPackage = (name, contentMapper = { exec: ['no-such-mapper'] }) =>
+    json({ name, version: '1.0.0', typescript: { contentMapper } });
+  add(
+    'content-mappers-without-flag',
+    {
+      'tsconfig.json': json({
+        compilerOptions: { strict: true },
+        contentMappers: [{ package: 'mapper', extensions: ['.box'], options: { list: [1, null, { deep: 'x' }] } }],
+      }),
+      'node_modules/mapper/package.json': mapperPackage('mapper'),
+      'a.ts': 'export {};\n',
+    },
+    mapperArgs,
+  );
+  add(
+    'content-mappers-flag-in-config',
+    {
+      'tsconfig.json': json({
+        compilerOptions: { runExternalCode: true },
+        contentMappers: [{ package: 'mapper', extensions: ['.box'] }],
+      }),
+      'node_modules/mapper/package.json': mapperPackage('mapper'),
+      'a.ts': 'export {};\n',
+    },
+    mapperArgs,
+  );
+  add(
+    'content-mappers-not-a-list',
+    {
+      'tsconfig.json': json({ contentMappers: { package: 'mapper', extensions: ['.box'] } }),
+      'node_modules/mapper/package.json': mapperPackage('mapper'),
+      'a.ts': 'export {};\n',
+    },
+    mapperArgs,
+  );
+  add('content-mappers-empty', { 'tsconfig.json': json({ contentMappers: [] }), 'a.ts': 'export {};\n' }, mapperArgs);
+  add(
+    'content-mappers-malformed-entries',
+    {
+      // A `null` entry is dropped from the list, and the entries after it are reported one entry early.
+      'tsconfig.json': json({
+        contentMappers: [
+          'mapper',
+          {},
+          { package: '', extensions: ['.a'] },
+          { package: 1, extensions: '.a' },
+          null,
+          { package: 'mapper', extensions: ['.b', 1] },
+          { package: 'mapper', extensions: [null] },
+          { package: 'mapper', extensions: ['.c'], outputExtensions: [] },
+          { package: 'mapper', extensions: ['.d'], outputExtensions: { '.d': 1 } },
+          { package: 'mapper', extensions: ['.e'], outputExtensions: { '.e': null } },
+          { package: 'mapper', extensions: ['.f'], outputExtensions: null, options: null },
+          { package: 'mapper', extensions: ['.g'], options: [] },
+          { package: 'mapper', extensions: ['.h'], options: 'x' },
+          { package: 'mapper', extensions: ['.i'], options: {} },
+        ],
+      }),
+      'node_modules/mapper/package.json': mapperPackage('mapper'),
+      'a.ts': 'export {};\n',
+    },
+    mapperArgs,
+  );
+  add(
+    'content-mappers-extensions',
+    {
+      'tsconfig.json': json({
+        contentMappers: [
+          {
+            package: 'one',
+            extensions: ['vue', '', '.', '.a/b', '.a\\b', '.ts', '.D.TS', '.x.json', '.mjs', '.vue', '.vue', '.Vue'],
+            outputExtensions: {
+              '.vue': '.js',
+              astro: 'js',
+              '.a/b': '.c\\d',
+              '.missing': '.js',
+              '': '',
+              '.': '.',
+              '.Vue': '.mjs',
+            },
+          },
+          { package: 'two', extensions: ['.vue', '.svelte', '.y.svelte'], outputExtensions: {} },
+        ],
+      }),
+      'node_modules/one/package.json': mapperPackage('one'),
+      'node_modules/two/package.json': mapperPackage('two'),
+      'a.ts': 'export {};\n',
+    },
+    mapperArgs,
+  );
+  add(
+    'content-mappers-packages',
+    {
+      'project/tsconfig.json': json({
+        contentMappers: [
+          { package: 'missing', extensions: ['.a'] },
+          { package: 'not-json', extensions: ['.b'] },
+          { package: 'not-an-object', extensions: ['.c'] },
+          { package: 'no-name', extensions: ['.d'] },
+          { package: 'no-manifest', extensions: ['.e'] },
+          { package: 'manifest-not-an-object', extensions: ['.f'] },
+          { package: 'no-exec', extensions: ['.g'] },
+          { package: 'exec-not-a-list', extensions: ['.h'] },
+          { package: 'exec-empty', extensions: ['.i'] },
+          { package: 'exec-of-numbers', extensions: ['.j'] },
+          { package: 'outputs-not-an-object', extensions: ['.k'] },
+          { package: 'outputs-of-numbers', extensions: ['.l'] },
+          { package: 'outputs-without-dot', extensions: ['.m'] },
+          { package: 'outputs-with-separator', extensions: ['.n'] },
+          { package: '@scope/above', extensions: ['.o'] },
+          { package: 'no-version', extensions: ['.p'] },
+          { package: './relative', extensions: ['.q'] },
+          { package: 'with-exports/sub', extensions: ['.r'] },
+        ],
+      }),
+      'project/a.ts': 'export {};\n',
+      'project/node_modules/not-json/package.json': '{ "name": ',
+      'project/node_modules/not-an-object/package.json': '[]',
+      'project/node_modules/no-name/package.json': json({ version: '1.0.0' }),
+      'project/node_modules/no-manifest/package.json': json({ name: 'no-manifest' }),
+      'project/node_modules/manifest-not-an-object/package.json': json({
+        name: 'manifest-not-an-object',
+        typescript: { contentMapper: ['run'] },
+      }),
+      'project/node_modules/no-exec/package.json': mapperPackage('no-exec', {}),
+      'project/node_modules/exec-not-a-list/package.json': mapperPackage('exec-not-a-list', { exec: 'run' }),
+      'project/node_modules/exec-empty/package.json': mapperPackage('exec-empty', { exec: [] }),
+      'project/node_modules/exec-of-numbers/package.json': mapperPackage('exec-of-numbers', { exec: [1] }),
+      'project/node_modules/outputs-not-an-object/package.json': mapperPackage('outputs-not-an-object', {
+        exec: ['run'],
+        outputExtensions: [],
+      }),
+      'project/node_modules/outputs-of-numbers/package.json': mapperPackage('outputs-of-numbers', {
+        exec: ['run'],
+        outputExtensions: { '.l': 1 },
+      }),
+      'project/node_modules/outputs-without-dot/package.json': mapperPackage('outputs-without-dot', {
+        exec: ['run'],
+        outputExtensions: { '.m': 'js' },
+      }),
+      'project/node_modules/outputs-with-separator/package.json': mapperPackage('outputs-with-separator', {
+        exec: ['run'],
+        outputExtensions: { '.m/n': '.js' },
+      }),
+      'node_modules/@scope/above/package.json': mapperPackage('@scope/above'),
+      'project/node_modules/no-version/package.json': json({
+        name: 'no-version',
+        typescript: { contentMapper: { exec: ['run'] } },
+      }),
+      'project/relative/package.json': mapperPackage('relative'),
+      'project/node_modules/with-exports/package.json': json({
+        name: 'with-exports',
+        exports: { './sub': './sub.js' },
+      }),
+      'project/node_modules/with-exports/sub/package.json': mapperPackage('with-exports-sub'),
+    },
+    mapperArgs.map((args) => ['-p', 'project', ...args]),
+  );
+  for (const rewriteRelativeImportExtensions of [false, true])
+    add(
+      `content-mappers-output-extensions${rewriteRelativeImportExtensions ? '-rewritten' : ''}`,
+      {
+        'tsconfig.json': json({
+          compilerOptions: { rewriteRelativeImportExtensions },
+          contentMappers: [
+            { package: 'to-js', extensions: ['.a', '.b'] },
+            { package: 'to-js', extensions: ['.c'], outputExtensions: null },
+            { package: 'to-js', extensions: ['.d'], outputExtensions: {} },
+            { package: 'to-js', extensions: ['.e'], outputExtensions: { '.e': '.e' } },
+            { package: 'to-js', extensions: ['.f', '.g'], outputExtensions: { '.f': '.mjs', '.g': '.G' } },
+            { package: 'plain', extensions: ['.h'] },
+          ],
+        }),
+        'node_modules/to-js/package.json': mapperPackage('to-js', {
+          exec: ['run'],
+          outputExtensions: { '.a': '.js', '.b': '.b', '.c': '.js', '.d': '.js', '.e': '.js', '.f': '.js' },
+        }),
+        'node_modules/plain/package.json': mapperPackage('plain'),
+        'a.ts': 'export {};\n',
+      },
+      mapperArgs,
+    );
+  add(
+    'content-mappers-extended',
+    {
+      'tsconfig.json': json({ extends: './base.json' }),
+      'base.json': json({
+        contentMappers: [{ package: 'mapper', extensions: ['.box', 'vue'] }, { package: 'missing' }],
+      }),
+      'own/tsconfig.json': json({
+        extends: '../base.json',
+        contentMappers: [{ package: 'mapper', extensions: ['.ts'] }],
+        files: ['../a.ts'],
+      }),
+      'last/tsconfig.json': json({ extends: ['../base.json', './reset.json', './empty.json'], files: ['../a.ts'] }),
+      'last/reset.json': json({ contentMappers: 'none' }),
+      'last/empty.json': json({ compilerOptions: { strict: true } }),
+      'node_modules/mapper/package.json': mapperPackage('mapper'),
+      'a.ts': 'export {};\n',
+    },
+    [
+      ...mapperArgs,
+      ...mapperArgs.map((args) => ['-p', 'own', ...args]),
+      ...mapperArgs.map((args) => ['-p', 'last', ...args]),
+    ],
+  );
   return fixtures;
 }
 
@@ -678,16 +898,7 @@ function optionValue(declaration, raw) {
  * Runs of test cases that tsc-ts answers differently from tsgo: the cases, the argument their differing runs
  * have, and what the differences the test finds must match. The comment of each entry gives the reason.
  */
-const differingRuns = [
-  // The 25 content mapper cases: tsc-ts does not read `contentMappers`, so it does not report TS18068 (content
-  // mappers need --runExternalCode) on the config's `contentMappers`, and exits with 0 where that is the only error.
-  {
-    name: /^compiler\/contentMapper/,
-    arg: '--listFilesOnly',
-    difference:
-      /^stdout line \d+: tsgo "[^"]*: error TS18068: [^"]*", ours (undefined|"[^"]*")(\nstatus tsgo 1, ours 0)?$/,
-  },
-];
+const differingRuns = [];
 
 /**
  * Projects from TypeScript's multi-file test cases. Cases with a tsconfig.json are run with it; others get one with

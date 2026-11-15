@@ -24,7 +24,18 @@ import {
   type SourceFile,
   propertyAssignmentPostfixToken,
 } from './ast.js';
+import { utf8Length } from './character-codes.js';
 import { enumNamesList } from './command-line.js';
+import {
+  ContentMapper,
+  ContentMapperDefinition,
+  equalFold,
+  getContentMapperForFileName,
+  getContentMapperOutputExtension,
+  readContentMapperManifest,
+  validateContentMapperExtensions,
+  type OptionPathSegment,
+} from './content-mapper.js';
 import {
   compareCodePoints,
   createCompilerDiagnostic,
@@ -34,7 +45,7 @@ import {
 } from './diagnostics.js';
 import type { FileSystem } from './file-system.js';
 import { isValidLocale } from './locale.js';
-import { ModuleResolutionHost, resolveConfig } from './module-resolution.js';
+import { ModuleResolutionHost, resolveConfig, Resolver } from './module-resolution.js';
 import {
   compilerOptionsByName,
   OptionNameMap,
@@ -46,6 +57,8 @@ import {
   getAllowJS,
   getResolveJsonModule,
   mergeCompilerOptions,
+  ModuleKind,
+  ModuleResolutionKind,
   PluginImport,
   setCompilerOption,
   setTypeAcquisitionOption,
@@ -64,6 +77,7 @@ import {
   changeExtension,
   combinePaths,
   containsPath,
+  ExtensionRewrite,
   fileExtensionIs,
   fileExtensionIsOneOf,
   getBaseFileName,
@@ -107,6 +121,52 @@ function stringItems(value: JsonValue | undefined): string[] | undefined {
   const result: string[] = [];
   for (const item of value.items) if (typeof item === 'string') result.push(item);
   return result;
+}
+
+/**
+ * The definition of the content mapper a `contentMappers` entry declares. `package` must be a non-empty
+ * string, `extensions` an array of strings, `outputExtensions`, if given and not `null`, an object of strings,
+ * and `options`, if given, an object, which is kept as JSON text. Each that is not is reported at `node`, the
+ * entry in `file`, and then there is no mapper; nor is there one for a value that is no object.
+ */
+function parseContentMapper(
+  value: JsonValue,
+  file: SourceFile | undefined,
+  node: Node | undefined,
+  errors: Diagnostic[],
+): ContentMapper | undefined {
+  if (!(value instanceof JsonObject)) return undefined;
+  const definition = new ContentMapperDefinition();
+  let valid = true;
+  const requireType = (name: string, type: string): void => {
+    errors.push(diagnosticAtNode(file, node, Diagnostics.Compiler_option_0_requires_a_value_of_type_1, name, type));
+    valid = false;
+  };
+  const packageName = value.entries.get('package');
+  if (typeof packageName === 'string' && packageName !== '') definition.package = packageName;
+  else requireType('contentMapper.package', 'string');
+  const extensions = value.entries.get('extensions');
+  if (extensions instanceof JsonArray && extensions.items.every((item) => typeof item === 'string'))
+    definition.extensions = stringItems(extensions) ?? [];
+  else requireType('contentMapper.extensions', 'string[]');
+  const outputExtensions = value.entries.get('outputExtensions');
+  if (outputExtensions !== undefined && outputExtensions !== null) {
+    const outputs = new Map<string, string>();
+    let strings = outputExtensions instanceof JsonObject;
+    if (outputExtensions instanceof JsonObject)
+      for (const [source, output] of outputExtensions.entries) {
+        if (typeof output === 'string') outputs.set(source, output);
+        else strings = false;
+      }
+    if (strings) definition.outputExtensions = outputs;
+    else requireType('contentMapper.outputExtensions', 'object or null');
+  }
+  if (value.entries.has('options')) {
+    const options = value.entries.get('options');
+    if (options instanceof JsonObject) definition.options = jsonText(options);
+    else requireType('contentMapper.options', 'object');
+  }
+  return valid ? new ContentMapper(definition) : undefined;
 }
 
 // ---- Supported extensions
@@ -226,11 +286,17 @@ export class ParsedCommandLine implements OutputPathsHost {
   private outputDtsToReference: Map<string, SourceOutputAndProjectReference> | undefined = undefined;
   private commonSourceDirectoryValue: string | undefined = undefined;
   private referencePaths: string[] | undefined = undefined;
+  private extensionRewrites: readonly ExtensionRewrite[] | undefined = undefined;
   /**
-   * The config file's JSON, with what the configs it extends add to `files`, `include`, `exclude` and
-   * `compileOnSave`; `undefined` without a config file.
+   * The config file's JSON, with what the configs it extends add to `files`, `include`, `exclude`,
+   * `contentMappers` and `compileOnSave`; `undefined` without a config file.
    */
   raw: JsonValue | undefined = undefined;
+  /**
+   * The content mappers of the config's `contentMappers` whose packages were found. There are none unless
+   * `--runExternalCode` is given.
+   */
+  contentMappers: readonly ContentMapper[] = [];
 
   constructor(
     readonly options: CompilerOptions,
@@ -255,6 +321,43 @@ export class ParsedCommandLine implements OutputPathsHost {
       for (const reference of this.projectReferences) this.referencePaths.push(resolveProjectReferencePath(reference));
     }
     return this.referencePaths;
+  }
+
+  /** The file extensions the content mappers register. */
+  contentMapperExtensions(): string[] {
+    const extensions: string[] = [];
+    for (const mapper of this.contentMappers)
+      for (const extension of mapper.definition.extensions ?? []) extensions.push(extension);
+    return extensions;
+  }
+
+  /**
+   * How the extensions of mapped files are rewritten in output names and import specifiers, the longest
+   * source extension first. Empty when no mapper changes an extension; otherwise an extension that is kept
+   * has an entry too, so that a shorter one does not rewrite it.
+   */
+  contentMapperExtensionRewrites(): readonly ExtensionRewrite[] {
+    if (this.extensionRewrites !== undefined) return this.extensionRewrites;
+    const rewrites: ExtensionRewrite[] = [];
+    let hasNonIdentityMapping = false;
+    const ignoreCase = !this.useCaseSensitiveFileNames;
+    for (const mapper of this.contentMappers)
+      for (const source of mapper.definition.extensions ?? []) {
+        const output = getContentMapperOutputExtension(mapper.definition.outputExtensions, source, ignoreCase);
+        const target = output === undefined || (ignoreCase && equalFold(output, source)) ? source : output;
+        if (target !== source) hasNonIdentityMapping = true;
+        rewrites.push(new ExtensionRewrite(source, target));
+      }
+    // tsgo orders by the length in bytes.
+    this.extensionRewrites = hasNonIdentityMapping
+      ? rewrites.sort((a, b) => utf8Length(b.source) - utf8Length(a.source))
+      : [];
+    return this.extensionRewrites;
+  }
+
+  /** The content mapper that registers the extension of `fileName`, or `undefined`. */
+  getContentMapperForFileName(fileName: string): ContentMapper | undefined {
+    return getContentMapperForFileName(this.contentMappers, fileName, this.useCaseSensitiveFileNames);
   }
 
   /** Diagnostics of reading the config: syntax errors, then option errors. */
@@ -383,6 +486,7 @@ const rootOptions = new OptionNameMap([
   typeAcquisitionDeclaration,
   extendsDeclaration,
   { name: 'references', kind: 'list', element: { name: 'references', kind: 'object' } },
+  { name: 'contentMappers', kind: 'list', element: { name: 'contentMappers', kind: 'object' } },
   { name: 'files', kind: 'list', element: { name: 'files', kind: 'string' } },
   { name: 'include', kind: 'list', element: { name: 'include', kind: 'string' } },
   { name: 'exclude', kind: 'list', element: { name: 'exclude', kind: 'string' } },
@@ -503,6 +607,84 @@ export function findArrayElement(property: PropertyAssignment | undefined, value
     if (element instanceof StringLiteral && element.text === value) return element;
   }
   return undefined;
+}
+
+/**
+ * The node a diagnostic about the `index`th entry of `contentMappers` is reported at: the value of the
+ * entry's property `subKey` if it is given and the entry has it, else the entry, else the value of
+ * `contentMappers` when it is no array or has no such entry. As in tsgo, `index` counts the entries the JSON
+ * value kept. `undefined` for a config without a `contentMappers` of its own.
+ */
+function getContentMapperSyntax(file: SourceFile | undefined, index: number, subKey: string): Node | undefined {
+  const property = findPropertyAssignment(getTsConfigObjectLiteral(file), 'contentMappers');
+  if (property === undefined) return undefined;
+  const initializer = property.initializer;
+  if (!(initializer instanceof ArrayLiteralExpression)) return initializer;
+  const elements = initializer.elements.nodes;
+  if (index < 0 || index >= elements.length) return initializer;
+  const element = elements[index];
+  if (subKey !== '' && element instanceof ObjectLiteralExpression) {
+    const value = findPropertyAssignment(element as ObjectLiteralExpression, subKey);
+    if (value !== undefined) return value.initializer;
+  }
+  return element;
+}
+
+/** The string literal `extension` in the `extensions` of the `index`th entry, else what stands for them. */
+function getContentMapperExtensionSyntax(
+  file: SourceFile | undefined,
+  index: number,
+  extension: string,
+): Node | undefined {
+  const node = getContentMapperSyntax(file, index, 'extensions');
+  if (node instanceof ArrayLiteralExpression)
+    for (const element of node.elements.nodes)
+      if (element instanceof StringLiteral && element.text === extension) return element;
+  return node;
+}
+
+/** The name of the `contentMappers` property, for a diagnostic about the setting as a whole. */
+function getContentMappersKeySyntax(file: SourceFile | undefined): Node | undefined {
+  return findPropertyAssignment(getTsConfigObjectLiteral(file), 'contentMappers')?.name;
+}
+
+/** A range of the text of a config file. */
+export class ConfigFileLocation {
+  constructor(
+    readonly file: SourceFile,
+    readonly pos: number,
+    readonly end: number,
+  ) {}
+}
+
+/**
+ * Where a diagnostic of `mapper` about its `options` is reported: the value `path` leads to from the
+ * `options` object of the mapper's entry, as far as the path can be followed, or the entry when it has no
+ * `options`. `undefined` without a config file, or one without a `contentMappers` of its own.
+ */
+export function getContentMapperOptionDiagnosticLocation(
+  config: ParsedCommandLine,
+  mapper: ContentMapper,
+  path: readonly OptionPathSegment[],
+): ConfigFileLocation | undefined {
+  const file = config.configFile?.sourceFile;
+  if (file === undefined) return undefined;
+  let node: Node | undefined = getContentMapperSyntax(file, config.contentMappers.indexOf(mapper), 'options');
+  if (node === undefined) return undefined;
+  for (const segment of path) {
+    let next: Node | undefined = undefined;
+    if (segment.isIndex) {
+      if (node instanceof ArrayLiteralExpression) {
+        const elements: readonly Node[] = (node as ArrayLiteralExpression).elements.nodes;
+        if (segment.index < elements.length) next = elements[segment.index];
+      }
+    } else if (node instanceof ObjectLiteralExpression) {
+      next = findPropertyAssignment(node as ObjectLiteralExpression, segment.property)?.initializer;
+    }
+    if (next === undefined) break;
+    node = next;
+  }
+  return new ConfigFileLocation(file, skipTrivia(file.text, node.pos), node.end);
 }
 
 /** The text of a property name, or `undefined` for computed names that aren't literals. */
@@ -724,7 +906,7 @@ function jsonText(value: JsonValue): string {
   if (value === null) return 'null';
   if (typeof value === 'string') return JSON.stringify(value);
   if (typeof value === 'boolean') return value ? 'true' : 'false';
-  if (typeof value === 'number') return String(value);
+  if (typeof value === 'number') return Object.is(value, -0) ? '-0' : String(value);
   if (value instanceof JsonArray) return jsonList(value.dropped ? undefined : value.items);
   const parts: string[] = [];
   for (const [key, item] of value.entries) parts.push(jsonText(key) + ':' + jsonText(item));
@@ -799,6 +981,7 @@ class ExtendsResult {
   include: JsonArray | undefined = undefined;
   exclude: JsonArray | undefined = undefined;
   files: JsonArray | undefined = undefined;
+  contentMappers: JsonArray | undefined = undefined;
   compileOnSave = false;
   readonly extendedSourceFiles = new Set<string>();
 }
@@ -1175,6 +1358,16 @@ export class ConfigParser {
     );
     file.configFileSpecs = specs;
 
+    const contentMappers = this.parseContentMappers(
+      raw,
+      file.sourceFile,
+      options,
+      configFileName !== ''
+        ? getNormalizedAbsolutePath(configFileName, basePath)
+        : combinePaths(basePathForFileNames, 'tsconfig.json'),
+      errors,
+    );
+
     const literalFiles = new Map<string, string>();
     const beforeRootFiles = this.beforeRootFiles;
     this.beforeRootFiles = undefined;
@@ -1274,7 +1467,98 @@ export class ConfigParser {
       literalFiles.size,
     );
     parsedCommandLine.raw = raw;
+    parsedCommandLine.contentMappers = contentMappers;
     return parsedCommandLine;
+  }
+
+  /**
+   * The content mappers the `contentMappers` of a config declare, with the manifest of each from the
+   * `package.json` of its package, which is looked up from `containingFile`, the config file, as a bundler
+   * resolves a package. Nothing of a package runs. Reports entries that are not well formed, extensions no
+   * mapper may register, and packages that are not found or are no mappers, whose mappers are left out; and
+   * an output extension that differs from its source without `rewriteRelativeImportExtensions`. Without
+   * `--runExternalCode` mappers are not trusted to run: that is reported and there are none.
+   */
+  private parseContentMappers(
+    raw: JsonValue,
+    file: SourceFile,
+    options: CompilerOptions,
+    containingFile: string,
+    errors: Diagnostic[],
+  ): ContentMapper[] {
+    const entries = rawList(raw, 'contentMappers').items;
+    if (entries === undefined) return [];
+    const ignoreCase = !this.fs.useCaseSensitiveFileNames;
+    const mappers: ContentMapper[] = [];
+    // The index of each mapper's entry, by which its syntax is found.
+    const indices: number[] = [];
+    for (let index = 0; index < entries.length; index++) {
+      const mapper = parseContentMapper(entries[index], file, getContentMapperSyntax(file, index, ''), errors);
+      if (mapper === undefined) continue;
+      mappers.push(mapper);
+      indices.push(index);
+    }
+    for (const problem of validateContentMapperExtensions(mappers, !ignoreCase)) {
+      const index = indices[problem.mapper];
+      const node = problem.inOutputExtensions
+        ? getContentMapperSyntax(file, index, 'outputExtensions')
+        : getContentMapperExtensionSyntax(file, index, problem.extension);
+      errors.push(diagnosticAtNode(file, node, problem.message, problem.extension));
+    }
+    if (mappers.length === 0) return mappers;
+    if (options.runExternalCode !== true) {
+      errors.push(
+        diagnosticAtNode(
+          file,
+          getContentMappersKeySyntax(file),
+          Diagnostics.Content_mappers_require_the_runExternalCode_command_line_flag_to_be_enabled,
+        ),
+      );
+      return [];
+    }
+    const resolved: ContentMapper[] = [];
+    for (let i = 0; i < mappers.length; i++) {
+      const mapper = mappers[i];
+      const definition = mapper.definition;
+      const host = new FileSystemResolutionHost(this.fs, getDirectoryPath(containingFile));
+      const packageDirectory = new Resolver(host, {
+        moduleResolution: ModuleResolutionKind.Bundler,
+      }).resolvePackageDirectory(definition.package, containingFile, ModuleKind.None)?.resolvedFileName;
+      const manifest = readContentMapperManifest(
+        definition.package,
+        packageDirectory === undefined || packageDirectory === ''
+          ? undefined
+          : this.fs.readFile(combinePaths(packageDirectory, 'package.json')),
+      );
+      mapper.packageDirectory = packageDirectory ?? '';
+      if (manifest instanceof Diagnostic) {
+        const node = getContentMapperSyntax(file, indices[i], 'package');
+        errors.push(diagnosticAtNode(file, node, manifest.message, ...manifest.args));
+        continue;
+      }
+      mapper.manifest = manifest;
+      const entry = entries[indices[i]];
+      if (entry instanceof JsonObject && !entry.entries.has('outputExtensions')) {
+        definition.outputExtensions =
+          manifest.defaultOutputExtensions === undefined ? undefined : new Map(manifest.defaultOutputExtensions);
+      }
+      for (const source of definition.extensions ?? []) {
+        const output = getContentMapperOutputExtension(definition.outputExtensions, source, ignoreCase);
+        if (output === undefined || output === source || (ignoreCase && equalFold(source, output))) continue;
+        if (options.rewriteRelativeImportExtensions === true) continue;
+        errors.push(
+          diagnosticAtNode(
+            file,
+            getContentMapperSyntax(file, indices[i], ''),
+            Diagnostics.Content_mapper_output_extension_mapping_from_0_to_1_requires_rewriteRelativeImportExtensions_to_be_enabled,
+            source,
+            output,
+          ),
+        );
+      }
+      resolved.push(mapper);
+    }
+    return resolved;
   }
 
   /** A config file's options with what it extends applied. */
@@ -1320,6 +1604,8 @@ export class ConfigParser {
       if (result.include !== undefined) raw.entries.set('include', result.include);
       if (result.exclude !== undefined) raw.entries.set('exclude', result.exclude);
       if (result.files !== undefined) raw.entries.set('files', result.files);
+      if (result.contentMappers !== undefined && !raw.entries.has('contentMappers'))
+        raw.entries.set('contentMappers', result.contentMappers);
       if (result.compileOnSave && !raw.entries.has('compileOnSave')) raw.entries.set('compileOnSave', true);
     }
     const extendedSourceFiles = new Set(file.extendedSourceFiles);
@@ -1372,6 +1658,12 @@ export class ConfigParser {
       else result.files = array;
     }
     if (extendsRaw instanceof JsonObject) {
+      // The last extended config with `contentMappers` decides, also when its value is not a list.
+      if (extendsRaw.entries.has('contentMappers')) {
+        const contentMappers = extendsRaw.entries.get('contentMappers');
+        result.contentMappers =
+          contentMappers instanceof JsonArray && !contentMappers.dropped ? contentMappers : undefined;
+      }
       const compileOnSave = extendsRaw.entries.get('compileOnSave');
       if (typeof compileOnSave === 'boolean') result.compileOnSave = compileOnSave;
     }
