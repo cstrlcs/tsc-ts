@@ -44,6 +44,49 @@ export class HostFileSystem extends FileSystem {
 }
 
 /**
+ * `fs` with the text of `fileName` replaced by `text`, as a program updated with `Program.updateFile` reads it.
+ * Replacing a file of a ReplacedFileSystem keeps its replaced texts and wraps its inner file system, so that a
+ * program updated many times reads through one wrapper, which holds the last text of each replaced file.
+ */
+export class ReplacedFileSystem extends FileSystem {
+  private readonly inner: FileSystem;
+  /** The replaced texts, by file name as the program names the file. */
+  private readonly texts: Map<string, string>;
+
+  constructor(fs: FileSystem, fileName: string, text: string) {
+    super(fs.useCaseSensitiveFileNames);
+    if (fs instanceof ReplacedFileSystem) {
+      this.inner = fs.inner;
+      this.texts = new Map(fs.texts);
+    } else {
+      this.inner = fs;
+      this.texts = new Map();
+    }
+    this.texts.set(fileName, text);
+  }
+
+  fileExists(path: string): boolean {
+    return this.texts.has(path) || this.inner.fileExists(path);
+  }
+
+  directoryExists(path: string): boolean {
+    return this.inner.directoryExists(path);
+  }
+
+  readFile(path: string): string | undefined {
+    return this.texts.get(path) ?? this.inner.readFile(path);
+  }
+
+  getAccessibleEntries(path: string): DirectoryEntries {
+    return this.inner.getAccessibleEntries(path);
+  }
+
+  realpath(path: string): string {
+    return this.inner.realpath(path);
+  }
+}
+
+/**
  * The compiler host of a program of tsc-ts's public API. A file that parse threads prepared, reading the disk, is
  * taken only when the host gives the same text for it; the program parses the host's text otherwise.
  */

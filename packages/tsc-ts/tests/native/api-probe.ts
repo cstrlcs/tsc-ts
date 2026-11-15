@@ -1,6 +1,7 @@
-// Prints tsc-ts/api's answers for a project, one line each: its files and diagnostics, and the symbol, types and
-// signatures at every node of its files outside the default libraries. The same answers are expected from a Node
-// build and a native build of this file. Usage: api-probe <tsconfig.json> <default library directory>
+// Prints tsc-ts/api's answers for a project, one line each: its files and diagnostics, the symbol, types and
+// signatures at every node of its files outside the default libraries, and the answers of the program with its last
+// file updated. The same answers are expected from a Node build and a native build of this file.
+// Usage: api-probe <tsconfig.json> <default library directory>
 import {
   createProgramFromConfigFile,
   type Diagnostic,
@@ -122,6 +123,32 @@ function probe(program: Program, checker: TypeChecker): void {
   }
 }
 
+/**
+ * The answers of the program with new text for its last file: one more declaration, which has an error, and then one
+ * more import, which `updateFile` refuses.
+ */
+function probeUpdate(program: Program): void {
+  const files = program.getSourceFiles();
+  const file = files[files.length - 1]!;
+  const text = file.text + '\nexport const probeUpdated: number = "text";\n';
+  const updated = program.updateFile(file.fileName, text);
+  print(`update ${nodeText(file)} ${updated !== undefined}`);
+  print(
+    `update with import ${program.updateFile(file.fileName, 'import "./probe-missing.js";\n' + text) !== undefined}`,
+  );
+  if (updated === undefined) return;
+  const updatedFile = updated.getSourceFile(file.fileName)!;
+  print(`  text ${updatedFile.text.length} ${program.getSourceFile(file.fileName)!.text.length}`);
+  for (const d of updated.getSemanticDiagnostics(updatedFile)) print(`  semantic ${diagnosticText(d)}`);
+  const checker = updated.getTypeChecker();
+  walkPreorder(updatedFile, (node) => {
+    if (node.pos < file.text.length) return;
+    const type = checker.getTypeAtLocation(node);
+    print(`  node ${nodeText(node)} ${type === undefined ? '-' : checker.typeToString(type)}`);
+  });
+  updated.dispose();
+}
+
 function isTupleTypeReference(type: Type): type is TupleTypeReference {
   return type.isTypeReference() && type.getTarget().isTupleType();
 }
@@ -143,6 +170,7 @@ const program = createProgramFromConfigFile(configFileName, {
   getDefaultLibraryDirectory: () => libDir,
 });
 probe(program, program.getTypeChecker());
+probeUpdate(program);
 const parsed = parseSourceFile(directory + '/parsed.ts', 'export const parsed = 1;\n');
 print(`parsed ${parsed.statements.nodes.length} ${parsed.statements.nodes[0]!.kind}`);
 try {

@@ -308,6 +308,14 @@ export interface Program {
   getProgramDiagnostics(): readonly Diagnostic[];
   getGlobalDiagnostics(): readonly Diagnostic[];
   getConfigFileParsingDiagnostics(): readonly Diagnostic[];
+  /**
+   * The program with the text of `fileName` replaced by `text`, as tsgo's UpdateProgram makes it: every other file,
+   * and the options and module resolutions, are this program's. Undefined when the program must be created again
+   * instead: the file is not in the program, is a package.json, belongs to a package installed more than once, or no
+   * longer imports, references or needs the same modules. This program stays as it was, and each of the two is
+   * disposed of on its own.
+   */
+  updateFile(fileName: string, text: string): Program | undefined;
   /** Frees the program's checkers. The program and its objects must not be used after. */
   dispose(): void;
 }

@@ -9,7 +9,7 @@ import type { SourceFile as CompilerSourceFile } from '../compiler/ast.js';
 import { dropLibGlobals } from '../compiler/checker-symbols.js';
 import type { Diagnostic as CompilerDiagnostic } from '../compiler/diagnostics.js';
 import { CachedFileSystem } from '../compiler/file-system.js';
-import { getNormalizedAbsolutePath } from '../compiler/path.js';
+import { getBaseFileName, getNormalizedAbsolutePath } from '../compiler/path.js';
 import { Program as CompilerProgram, sortAndDeduplicateDiagnostics } from '../compiler/program.js';
 import { ConfigParser, ParsedCommandLine } from '../compiler/tsconfig.js';
 import type { SourceFile } from './ast.js';
@@ -17,7 +17,7 @@ import { LibraryTypeChecker } from './checker.js';
 import type { CompilerOptions } from './compiler-options.generated.js';
 import { type DiagnosticKind, diagnosticOf, programDiagnostics } from './diagnostics.js';
 import { DisposedProgramError, internalError } from './errors.js';
-import { HostFileSystem, LibraryCompilerHost } from './host.js';
+import { HostFileSystem, LibraryCompilerHost, ReplacedFileSystem } from './host.js';
 import { type ApiCompilerOptions, compilerOptionsFromApi, compilerOptionsOf } from './options.js';
 import type {
   CreateProgramOptions,
@@ -280,6 +280,28 @@ class LibraryProgram implements Program {
 
   getConfigFileParsingDiagnostics(): readonly Diagnostic[] {
     return this.diagnostics('config', undefined);
+  }
+
+  updateFile(fileName: string, text: string): Program | undefined {
+    try {
+      const program = this.program;
+      const file = program.getSourceFile(fileName);
+      // A package.json decides the module formats and resolutions of other files, as tsgo's project service checks.
+      if (file === undefined || getBaseFileName(file.fileName) === 'package.json') return undefined;
+      const host = program.host;
+      const next = program.updateFile(
+        file.path,
+        new LibraryCompilerHost(
+          new ReplacedFileSystem(host.fs, file.fileName, text),
+          host.currentDirectory,
+          host.defaultLibraryPath,
+        ),
+      );
+      if (next === undefined) return undefined;
+      return new LibraryProgram(new CheckedProgram(next));
+    } catch (e) {
+      throw internalError(e);
+    }
   }
 
   dispose(): void {
