@@ -288,11 +288,34 @@ test('symbols, types and signatures answer as tsc --api', { skip, timeout: 600_0
             valueDeclaration: handleOf(r.valueDeclaration),
           };
 
+    /**
+     * Compares a type the library answers with tsgo's here; visitType only queues the ones not seen before. It
+     * goes first, to take the object flags before the type is printed, which resolves its members.
+     */
+    const sameType = async (lib, ref, what) => {
+      visitType(lib, ref, what);
+      if (lib !== undefined && ref !== null)
+        expect(
+          { flags: lib.flags >>> 0, text: typeText(lib) },
+          { flags: ref.flags >>> 0, text: await tsgoText(ref) },
+          what,
+        );
+    };
+
     const pairs = [];
     let nonAliasChecked = false;
     let otherNodeChecked = false;
     let unknownSymbols = 0;
     let moduleExports = 0;
+    const answers = {
+      apparent: 0,
+      constraint: 0,
+      widened: 0,
+      awaited: 0,
+      notAwaitable: 0,
+      stringIndex: 0,
+      numberIndex: 0,
+    };
     const seen = new Set();
     const visitType = (lib, ref, what) => {
       if ((lib === undefined) !== (ref === null || ref === undefined)) {
@@ -681,6 +704,30 @@ test('symbols, types and signatures answer as tsc --api', { skip, timeout: 600_0
           await tsgo.json('getNonNullableType', { ...base, objectId: ref.id }),
           `non-nullable ${what}`,
         );
+        const apparent = checker.getApparentType(lib);
+        await sameType(apparent, await tsgo.json('getApparentType', { ...base, objectId: ref.id }), `apparent ${what}`);
+        if (apparent !== lib) answers.apparent++;
+        const constraint = checker.getBaseConstraintOfType(lib);
+        await sameType(
+          constraint,
+          await tsgo.json('getBaseConstraintOfType', { ...base, type: ref.id }),
+          `base constraint of ${what}`,
+        );
+        if (constraint !== undefined && constraint !== lib) answers.constraint++;
+        const widened = checker.getWidenedType(lib);
+        await sameType(widened, await tsgo.json('getWidenedType', { ...base, type: ref.id }), `widened ${what}`);
+        if (typeText(widened) !== typeText(lib)) answers.widened++;
+        const awaited = checker.getAwaitedType(lib);
+        await sameType(awaited, await tsgo.json('getAwaitedType', { ...base, type: ref.id }), `awaited ${what}`);
+        if (awaited === undefined) answers.notAwaitable++;
+        else if (awaited !== lib) answers.awaited++;
+        // TypeScript 7's getIndexTypeOfType is the value type of its getIndexInfoOfType.
+        for (const kind of [api.IndexKind.String, api.IndexKind.Number]) {
+          const indexType = checker.getIndexTypeOfType(lib, kind);
+          const refInfo = await tsgo.json('getIndexInfoOfType', { ...base, type: ref.id, kind });
+          await sameType(indexType, refInfo?.valueType ?? null, `index type ${api.IndexKind[kind]} of ${what}`);
+          if (indexType !== undefined) answers[kind === api.IndexKind.String ? 'stringIndex' : 'numberIndex']++;
+        }
       }
     }
     const sample = pairs.slice(0, 24);
@@ -699,6 +746,41 @@ test('symbols, types and signatures answer as tsc --api', { skip, timeout: 600_0
     assert.ok(pairs.length > 200, `${pairs.length} types compared`);
     assert.ok(unknownSymbols > 0, 'an alias that resolves to the unknown symbol');
     assert.ok(moduleExports > 0, 'a module with exports of its own and of an `export *`');
+    for (const [answer, count] of Object.entries(answers)) assert.ok(count > 0, `${answer}: ${count} types`);
+  } finally {
+    await tsgo.close();
+  }
+});
+
+test('getWidenedType widens null and undefined as tsc --api without strictNullChecks', { skip }, async () => {
+  const { api, dir, program, checker, tsgo, base, handle } = await open('library-loose');
+  try {
+    const failures = [];
+    let widenedTypes = 0;
+    for (const file of program.getSourceFiles()) {
+      if (!file.fileName.startsWith(dir)) continue;
+      const locations = [];
+      api.walkPreorder(file, (node) => {
+        if (node !== file) locations.push(node);
+      });
+      for (const node of locations) {
+        const location = handle(node);
+        const type = checker.getTypeAtLocation(node);
+        const widened = checker.getWidenedType(type);
+        const refType = await tsgo.json('getTypeAtLocation', { ...base, location });
+        const refWidened = await tsgo.json('getWidenedType', { ...base, type: refType.id });
+        const actual = [checker.typeToString(type), widened.flags >>> 0, checker.typeToString(widened)];
+        const expected = [
+          await tsgo.json('typeToString', { ...base, type: refType.id }),
+          refWidened.flags >>> 0,
+          await tsgo.json('typeToString', { ...base, type: refWidened.id }),
+        ];
+        if (JSON.stringify(actual) !== JSON.stringify(expected)) failures.push({ location, actual, expected });
+        if (widened !== type) widenedTypes++;
+      }
+    }
+    assert.deepEqual(failures.slice(0, 20), []);
+    assert.ok(widenedTypes > 5, `${widenedTypes} types widened`);
   } finally {
     await tsgo.close();
   }

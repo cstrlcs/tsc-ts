@@ -9,6 +9,7 @@ import type { CompilerOptions } from './compiler-options.generated.js';
 import type {
   DiagnosticCategory,
   ElementFlags,
+  IndexKind,
   ModuleKind,
   ObjectFlags,
   SignatureFlags,
@@ -375,6 +376,28 @@ export interface TypeChecker {
   getTypeFromTypeNode(node: TypeNode): Type | undefined;
   getBaseTypeOfLiteralType(type: Type): Type | undefined;
   getNonNullableType(type: Type): Type | undefined;
+  /** The type whose members a value of `type` has: the global interface of a primitive, the constraint of a type parameter. */
+  getApparentType(type: Type): Type;
+  /**
+   * The base constraint of a type that has one: of a type parameter, an indexed access, conditional, `keyof`,
+   * template literal or string mapping type or a generic tuple, its constraint with the constraints in it
+   * resolved; of a union or an intersection, the one of its members' constraints, itself when none is generic.
+   * Undefined for any other type, without a constraint, and for a circular one.
+   */
+  getBaseConstraintOfType(type: Type): Type | undefined;
+  /**
+   * `type` as a declaration infers it from an initializer of that type: the object literal types of a union get
+   * each other's missing properties as optional ones, and without `strictNullChecks` `null` and `undefined` become
+   * `any`. Literal types stay as they are.
+   */
+  getWidenedType(type: Type): Type;
+  /**
+   * The type `await` gives for a value of `type`: the promised type of a promise, unwrapped to the end, or the type
+   * itself. Undefined for a type `await` reports, as one whose `then` takes no callback.
+   */
+  getAwaitedType(type: Type): Type | undefined;
+  /** The value type of the index signature of `type` whose key is `string` or `number`; undefined without one. */
+  getIndexTypeOfType(type: Type, kind: IndexKind): Type | undefined;
   getBaseTypes(type: InterfaceType): readonly Type[];
   getConstantValue(node: Node): string | number | undefined;
   /** The JSDoc tags of a symbol's declarations, in source order, each with its text as a plain string. */

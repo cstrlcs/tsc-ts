@@ -19,6 +19,7 @@ import {
   getTextOfNode,
   getTrailingCommentRanges,
   hasInitializer,
+  IndexKind,
   InternalCompilerError,
   isAssignmentOperator,
   isCallExpression,
@@ -184,6 +185,14 @@ function probe(program: Program, checker: TypeChecker): void {
       print(`  index ${checker.typeToString(info.keyType)} ${checker.typeToString(info.type)} ${info.isReadonly}`);
     print(
       `  array ${checker.isArrayType(type)} tuple ${checker.isTupleType(type)} arrayLike ${checker.isArrayLikeType(type)}`,
+    );
+    const text = (answer: Type | undefined): string => (answer === undefined ? '-' : checker.typeToString(answer));
+    print(
+      `  apparent ${text(checker.getApparentType(type))} constraint ${text(checker.getBaseConstraintOfType(type))}`,
+    );
+    print(`  widened ${text(checker.getWidenedType(type))} awaited ${text(checker.getAwaitedType(type))}`);
+    print(
+      `  index types ${text(checker.getIndexTypeOfType(type, IndexKind.String))} ${text(checker.getIndexTypeOfType(type, IndexKind.Number))}`,
     );
     if (isTupleTypeReference(type)) {
       const target = type.getTarget();

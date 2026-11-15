@@ -79,9 +79,3 @@ export type {
   UnionOrIntersectionType,
   UnionType,
 } from './types.js';
-
-/** The kind of an index signature's key, as TypeScript 5 numbers it. */
-export enum IndexKind {
-  String = 0,
-  Number = 1,
-}

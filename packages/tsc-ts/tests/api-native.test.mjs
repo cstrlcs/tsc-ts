@@ -49,11 +49,13 @@ test('a native build of tsc-ts/api answers as the Node build', { skip, timeout: 
     `${build.error === undefined ? '' : build.error.message + '\n'}${readFileSync(log, 'utf8')}`,
   );
 
-  // The library fixture (more than 4,000 answers), one whose files and config file have errors, and a project
-  // that loads the sources of the projects it references, one of them a package linked into its node_modules.
+  // The library fixture (more than 4,000 answers), one whose files and config file have errors, one without
+  // strictNullChecks, where types widen, and a project that loads the sources of the projects it references, one of
+  // them a package linked into its node_modules.
   for (const [fixture, minimum, configName] of [
     ['library', 4000, 'tsconfig.json'],
     ['library-errors', 50, 'tsconfig.json'],
+    ['library-loose', 100, 'tsconfig.json'],
     ['referenced-projects', 300, 'app/tsconfig.json'],
   ]) {
     const dir = tempDir('tsc-ts-api-native-');

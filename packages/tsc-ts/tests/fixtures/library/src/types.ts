@@ -39,6 +39,10 @@ export type Lookup<T, K extends keyof T> = T[K];
 export type Maybe<T> = T | undefined | null;
 export const big = 12345678901234567890n;
 export const sym: unique symbol = Symbol('sym');
+export const pending = Promise.resolve(big);
+export const either = Math.random() > 0.5 ? { one: 1 } : { two: 'b' };
+/** `await` reports it: its `then` takes no callback. */
+export declare const thenable: { then(): void };
 
 export function isPoint(value: unknown): value is Point {
   return typeof value === 'object' && value !== null && 'x' in value;

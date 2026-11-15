@@ -6,8 +6,12 @@ import type { Node as CompilerNode } from '../compiler/ast.js';
 import { type Checker, disposeChecker } from '../compiler/checker.js';
 import { getBaseTypes, getDeclaredTypeOfSymbol } from '../compiler/checker-declared-types.js';
 import { getNonNullableType } from '../compiler/checker-flow.js';
+import { getAwaitedType } from '../compiler/checker-iteration.js';
 import {
+  getApparentType,
+  getBaseConstraintOfType,
   getIndexInfosOfType,
+  getIndexTypeOfType,
   getPropertiesOfType,
   getPropertyOfType,
   getSignaturesOfType,
@@ -26,7 +30,7 @@ import {
   querySignatureFromDeclaration,
 } from '../compiler/checker-services.js';
 import { getReturnTypeOfSignature, getTypePredicateOfSignature } from '../compiler/checker-signatures.js';
-import { getTypeOfSymbol } from '../compiler/checker-symbol-types.js';
+import { getTypeOfSymbol, getWidenedType } from '../compiler/checker-symbol-types.js';
 import { getParentOfSymbol, resolveAlias, resolveName } from '../compiler/checker-symbols.js';
 import {
   compareSymbols,
@@ -50,7 +54,7 @@ import {
 } from '../compiler/symbol.js';
 import { typeToString } from '../compiler/type-printer.js';
 import type { Expression, Identifier, Node, TypeNode } from './ast.js';
-import { SignatureKind, SymbolFlags, TypeFormatFlags, type TypePredicateKind } from './enums.generated.js';
+import { IndexKind, SignatureKind, SymbolFlags, TypeFormatFlags, type TypePredicateKind } from './enums.generated.js';
 import { internalError } from './errors.js';
 import { getSymbolJSDocTags } from './jsdoc.js';
 import type {
@@ -298,6 +302,51 @@ export class LibraryTypeChecker implements TypeChecker {
   getNonNullableType(t: Type): Type | undefined {
     try {
       return publicType(getNonNullableType(this.c, type(t)));
+    } catch (e) {
+      throw internalError(e);
+    }
+  }
+
+  getApparentType(t: Type): Type {
+    try {
+      return publicType(getApparentType(this.c, type(t)))!;
+    } catch (e) {
+      throw internalError(e);
+    }
+  }
+
+  getBaseConstraintOfType(t: Type): Type | undefined {
+    try {
+      return publicType(getBaseConstraintOfType(this.c, type(t)));
+    } catch (e) {
+      throw internalError(e);
+    }
+  }
+
+  getWidenedType(t: Type): Type {
+    try {
+      return publicType(getWidenedType(this.c, type(t)))!;
+    } catch (e) {
+      throw internalError(e);
+    }
+  }
+
+  getAwaitedType(t: Type): Type | undefined {
+    try {
+      return publicType(getAwaitedType(this.c, type(t)));
+    } catch (e) {
+      throw internalError(e);
+    }
+  }
+
+  /**
+   * The index signature's value type by the kind of its key, as TypeScript 7's Checker reads it from the index
+   * infos; the getIndexTypeOfType request of `tsc --api` is Type.getIndexType().
+   */
+  getIndexTypeOfType(t: Type, kind: IndexKind): Type | undefined {
+    try {
+      const keyType = kind === IndexKind.String ? this.c.stringType : this.c.numberType;
+      return publicType(getIndexTypeOfType(this.c, type(t), keyType));
     } catch (e) {
       throw internalError(e);
     }

@@ -51,6 +51,7 @@ const enumFiles = [
   'elementFlags',
   'signatureFlags',
   'signatureKind',
+  'indexKind',
   'typePredicateKind',
   'nodeBuilderFlags',
   'scriptTarget',

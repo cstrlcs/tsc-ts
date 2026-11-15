@@ -838,6 +838,11 @@ export enum SignatureKind {
   Construct = 1,
 }
 
+export enum IndexKind {
+  String = 0,
+  Number = 1,
+}
+
 export enum TypePredicateKind {
   This = 0,
   Identifier = 1,
