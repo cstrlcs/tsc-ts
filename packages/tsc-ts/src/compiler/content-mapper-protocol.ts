@@ -13,8 +13,9 @@
  * A mapper counts positions in the encoding it selected. The compiler's are UTF-16 offsets, so every position
  * of a response is checked and converted here, where tsgo converts to UTF-8 offsets.
  *
- * A response is decoded from its parsed JSON. tsgo decodes the text, and so also rejects a repeated name in an
- * object and an integer written with a fraction or an exponent.
+ * A response is decoded from its parsed JSON. An integer in it is written without a fraction and without an
+ * exponent, as tsgo's decoder demands. tsgo also rejects a repeated name in an object, which the host that
+ * parses a mapper's message does (`JsonParser.repeatedName`).
  */
 import {
   ContentMapperOptionDiagnostic,
@@ -130,7 +131,7 @@ function stringMember(object: ReadonlyMap<string, JsonValue>, name: string): str
 /** A value that is an integer, 0 when it is absent, and `undefined` when it is anything else. */
 function integer(value: JsonValue | undefined): number | undefined {
   if (value === undefined || value.type === 'null') return 0;
-  if (value.type !== 'number' || !Number.isInteger(value.value)) return undefined;
+  if (value.type !== 'number' || !value.integer || !Number.isInteger(value.value)) return undefined;
   // The range of a 64-bit integer.
   return Math.abs(value.value) < 9223372036854775808 ? value.value : undefined;
 }

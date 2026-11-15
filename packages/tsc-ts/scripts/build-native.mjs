@@ -1,9 +1,11 @@
 // Builds the native tsc-ts, dist/tsc (`npm run build:native`; `--dev` for `npm run build:native:dev`). On Windows it
 // first compiles native/pipe-win32.c, the named pipe server of `tsc-ts --api --pipe`, with zig (the linker scriptc
 // uses there) and links it through native/pipe-win32.ffi.json. On Linux and macOS it first compiles
-// native/listen-posix.c, the Unix socket server of `tsc-ts --api --listen`, with clang, or with zig for the
-// SCRIPTC_TARGET that scriptc links for, and links it through native/listen-posix.ffi.json. Then it checks that the
-// number fields of Node, Type and Symbol are 32-bit integers in the build (scripts/check-int32-fields.mjs).
+// native/listen-posix.c, the Unix socket server of `tsc-ts --api --listen`, and native/spawn-posix.c, the processes
+// of content mappers, with clang, or with zig for the SCRIPTC_TARGET that scriptc links for, and links them through
+// dist/posix.ffi.json, which it writes from native/listen-posix.ffi.json and native/spawn-posix.ffi.json, since
+// scriptc takes one manifest. Then it checks that the number fields of Node, Type and Symbol are 32-bit integers in
+// the build (scripts/check-int32-fields.mjs).
 //
 // Optimized Linux builds compile with `scriptc build --exceptions=rare` (a scriptc with a second profile phase knows
 // the option): the check's recursive functions propagate an exception by native unwinding instead of testing a flag
@@ -102,20 +104,21 @@ if (windows) {
   args.push('--ffi', 'native/pipe-win32.ffi.json');
 } else {
   const target = process.env.SCRIPTC_TARGET;
-  const flags = [
-    '-std=c11',
-    '-O2',
-    '-Wall',
-    '-Wextra',
-    '-Werror',
-    '-c',
-    'native/listen-posix.c',
-    '-o',
-    'dist/listen-posix.o',
-  ];
-  if (target) run('zig', ['cc', '-target', target, ...flags]);
-  else run('clang', flags);
-  args.push('--ffi', 'native/listen-posix.ffi.json');
+  // scriptc binds the functions of the last --ffi only, so the manifests of the two are written as one.
+  const manifest = { ffi_format: 0, functions: [], libraries: [] };
+  for (const name of ['listen-posix', 'spawn-posix']) {
+    const flags = ['-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-c', `native/${name}.c`, '-o', `dist/${name}.o`];
+    if (target) run('zig', ['cc', '-target', target, ...flags]);
+    else run('clang', flags);
+    const { ffi_format, functions, libraries } = JSON.parse(
+      readFileSync(join(root, `native/${name}.ffi.json`), 'utf8'),
+    );
+    manifest.ffi_format = Math.max(manifest.ffi_format, ffi_format);
+    manifest.functions.push(...functions);
+    manifest.libraries.push(...libraries.map((library) => join(root, 'native', library)));
+  }
+  writeFileSync(join(root, 'dist/posix.ffi.json'), JSON.stringify(manifest));
+  args.push('--ffi', 'dist/posix.ffi.json');
 }
 args.push(...passed, '-o', output);
 if (!useProfile) run(scriptc, args);

@@ -1,0 +1,28 @@
+{
+  "ffi_format": 6,
+  "functions": [
+    { "name": "tscTsSpawn", "symbol": "tsc_ts_spawn", "params": ["string", "string", "bool"], "returns": "i32" },
+    { "name": "tscTsSpawnError", "symbol": "tsc_ts_spawn_error", "params": ["mutable-bytes"], "returns": "i32" },
+    { "name": "tscTsProcessWrite", "symbol": "tsc_ts_process_write", "params": ["i32", "bytes"], "returns": "i32" },
+    {
+      "name": "tscTsProcessRead",
+      "symbol": "tsc_ts_process_read",
+      "params": ["i32", "mutable-bytes", "i32"],
+      "returns": "i32"
+    },
+    {
+      "name": "tscTsProcessReadError",
+      "symbol": "tsc_ts_process_read_error",
+      "params": ["i32", "mutable-bytes"],
+      "returns": "i32"
+    },
+    {
+      "name": "tscTsProcessExitCode",
+      "symbol": "tsc_ts_process_exit_code",
+      "params": ["i32", "i32"],
+      "returns": "i32"
+    },
+    { "name": "tscTsProcessClose", "symbol": "tsc_ts_process_close", "params": ["i32"], "returns": "void" }
+  ],
+  "libraries": ["../dist/spawn-posix.o"]
+}

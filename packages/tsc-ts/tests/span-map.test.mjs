@@ -594,3 +594,32 @@ test(
     assert.ok(tally.undecoded > 20 && tally.invalid > 100 && tally.results > 100_000, JSON.stringify(tally));
   },
 );
+
+test(
+  'an integer of a map is written without a fraction or an exponent, as tsgo demands',
+  { skip: !existsSync(oracle) && 'spanmap-oracle is not built' },
+  () => {
+    // The maps as text: JSON.stringify writes every integer the plain way.
+    const mappings = [
+      '[[0,3,0,3,0]]',
+      '[[0,3.0,0,3,0]]',
+      '[[0,3,0,3e0,0]]',
+      '[[0,3,0,3,0E0]]',
+      '[[0,3,0,3,0,1.0]]',
+      '[[-0,3,0,3,0]]',
+      '[[0,3,0,3,0,1048575]]',
+    ];
+    const file = join(out, 'span-map-spellings.json');
+    writeFileSync(
+      file,
+      `[${mappings.map((text) => `{"mappings":${text},"virtual":"abc","original":"abc","queries":[]}`).join(',')}]`,
+    );
+    const expected = JSON.parse(execFileSync(oracle, [file], { encoding: 'utf8' }));
+    const decoded = mappings.map((text) => SpanMap.unmarshal(parseJson(text)) !== undefined);
+    assert.deepEqual(
+      decoded,
+      expected.map((answer) => answer.decoded),
+    );
+    assert.deepEqual(decoded, [true, false, false, false, false, true, true]);
+  },
+);

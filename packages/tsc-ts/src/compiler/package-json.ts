@@ -37,6 +37,8 @@ export interface JsonBoolean {
 export interface JsonNumber {
   readonly type: 'number';
   readonly value: number;
+  /** Whether the number is written as an integer: without a fraction and without an exponent. */
+  readonly integer: boolean;
 }
 export interface JsonString {
   readonly type: 'string';
@@ -97,6 +99,10 @@ function objectKind(entries: ReadonlyMap<string, JsonValue>): JsonObjectKind {
 /** Strict RFC 8259 parser. Any error makes the whole document unparseable. */
 export class JsonParser {
   pos = 0;
+  /** Whether an object parsed so far repeats a name, which tsgo's decoder of protocol messages rejects. */
+  repeatedName = false;
+  /** Whether the number `number` parsed last is written as an integer. */
+  private integerNumber = false;
 
   constructor(readonly text: string) {}
 
@@ -136,7 +142,7 @@ export class JsonParser {
     if (c === 0x66) return this.literal('false', JSON_FALSE);
     if (c === 0x6e) return this.literal('null', JSON_NULL);
     const n = this.number();
-    return n === undefined ? undefined : { type: 'number', value: n };
+    return n === undefined ? undefined : { type: 'number', value: n, integer: this.integerNumber };
   }
 
   literal(text: string, value: JsonValue): JsonValue | undefined {
@@ -157,6 +163,7 @@ export class JsonParser {
       if (key === undefined) return undefined;
       const value = this.value();
       if (value === undefined) return undefined;
+      if (entries.has(key)) this.repeatedName = true;
       entries.set(key, value);
       if (!this.endOfMember(0x7d)) return undefined;
       if (this.peek() === 0x7d) {
@@ -325,7 +332,8 @@ export class JsonParser {
     else if (first >= 0x31 && first <= 0x39) pos = digits(text, pos);
     else return undefined;
     const next = pos < text.length ? text.charCodeAt(pos) : -1;
-    if (next !== 0x2e && next !== 0x65 && next !== 0x45 && pos - integerStart <= 15) {
+    this.integerNumber = next !== 0x2e && next !== 0x65 && next !== 0x45;
+    if (this.integerNumber && pos - integerStart <= 15) {
       // An integer of up to 15 digits, which its digits give exactly.
       let value = 0;
       for (let i = integerStart; i < pos; i++) value = value * 10 + (text.charCodeAt(i) - 0x30);

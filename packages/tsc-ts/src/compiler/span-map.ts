@@ -207,10 +207,8 @@ export class SpanMap {
   /**
    * Decodes the JSON tuples a content mapper sends: `[virtualStart, virtualLength, originalStart,
    * originalLength, kind]`, with the features as an optional sixth element. Five elements mean every feature.
-   * `undefined` when the value is not an array of such tuples of 32-bit integers; `null` is the empty map.
-   *
-   * tsgo decodes the JSON text and rejects an integer written with a fraction or an exponent (`3.0`, `1e2`),
-   * which a parsed value no longer tells apart from `3` and `100`.
+   * `undefined` when the value is not an array of such tuples of 32-bit integers; `null` is the empty map. An
+   * integer is written without a fraction and without an exponent: `3.0` and `1e2` are rejected, as by tsgo.
    */
   static unmarshal(value: JsonValue): SpanMap | undefined {
     if (value.type === 'null') return new SpanMap([]);
@@ -222,7 +220,8 @@ export class SpanMap {
       for (const element of item.items) {
         // A `null` element decodes as 0, as it does into a Go integer.
         if (element.type === 'null') tuple.push(0);
-        else if (element.type === 'number' && (element.value | 0) === element.value) tuple.push(element.value);
+        else if (element.type === 'number' && element.integer && (element.value | 0) === element.value)
+          tuple.push(element.value);
         else return undefined;
       }
       if (tuple.length !== 5 && tuple.length !== 6) return undefined;

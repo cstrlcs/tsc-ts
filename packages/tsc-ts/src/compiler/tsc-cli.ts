@@ -3,6 +3,7 @@
  * tsconfig.json, `--showConfig`, program construction and `--listFilesOnly`.
  */
 import { mark } from './timeline.js';
+import type { ProcessChannel, ProcessSpawner } from './content-mapper-process-host.js';
 import { FileBuildInfoReader, readBuildInfoProgram, type Snapshot } from './incremental.js';
 import {
   createCompilerDiagnostic,
@@ -51,7 +52,7 @@ export enum ExitStatus {
 }
 
 /** The process environment `tsc` runs in. All output goes to `write`. */
-export abstract class System extends CommandLineHost {
+export abstract class System extends CommandLineHost implements ProcessSpawner {
   constructor(
     currentDirectory: string,
     readonly writeOutputIsTTY: boolean,
@@ -86,6 +87,13 @@ export abstract class System extends CommandLineHost {
    * files.
    */
   abstract watchDirectory(path: string, onChange: () => void): DirectoryWatch | undefined;
+  /**
+   * Starts the command of a content mapper in `directory`, as tsgo's system does: a first word without a
+   * directory separator is looked up on `PATH`, and the process's standard error is discarded unless
+   * `captureStandardError` asks for it. Returns the channel to the process's standard input and output, or why
+   * the process could not be started.
+   */
+  abstract spawn(command: readonly string[], directory: string, captureStandardError: boolean): ProcessChannel | string;
 
   private readonly startTime = performance.now();
 

@@ -672,6 +672,33 @@ test('an initialize response selects an encoding and a diagnostic source that is
   assert.equal(invalid.kind, InitializeErrorKind.InvalidResponse);
 });
 
+test('an integer of a response is written without a fraction or an exponent', () => {
+  // tsgo's decoder rejects `1.0` and `1e0` for an integer, as the span map oracle shows for mappings.
+  const response = (start) =>
+    protocol.decodeTransformResult(
+      parseJson(
+        `{"text":"ab","extension":".ts","diagnostics":[{"messageText":"m","start":${start},"length":1,"code":1}]}`,
+      ),
+      'ab',
+      'utf-8',
+      'mapper',
+    );
+  assert.equal(response('1').diagnostics.length, 1);
+  for (const start of ['1.0', '1e0', '10E-1']) {
+    const error = response(start);
+    assert.ok(error instanceof TransformError, start);
+    assert.equal(error.kind, TransformErrorKind.Response, start);
+  }
+  const opened = (code) =>
+    protocol.decodeOpenProjectResult(
+      parseJson(`{"optionDiagnostics":[{"path":["a",0],"messageText":"m","code":${code}}]}`),
+      mapper({ name: 'mapper' }),
+      'mapper',
+    );
+  assert.equal(opened('7').optionDiagnostics[0].code, 7);
+  assert.ok(opened('7.0') instanceof ProjectError);
+});
+
 test('an openProject response follows what the mapper declared', () => {
   const open = (response, fields = {}) =>
     protocol.decodeOpenProjectResult(json(response), mapper({ name: 'm', exec: ['m'], ...fields }), 'vue');
