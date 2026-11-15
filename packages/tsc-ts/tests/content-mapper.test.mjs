@@ -3,7 +3,7 @@
 // (packages/tsgo/dist/contentmapper-oracle, built by `npm run build:oracle`) given the same mapper responses.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createCases, runOracle } from './content-mapper-cases.mjs';
@@ -12,6 +12,7 @@ import { compileSources } from './temp.mjs';
 const repo = resolve(import.meta.dirname, '../../..');
 const oracle = join(repo, 'packages/tsgo/dist/contentmapper-oracle');
 const skip = !existsSync(oracle) && 'contentmapper-oracle is not built';
+const tsgoOptions = join(repo, 'upstream/TypeScript/tsc/internal/core/options_generated.go');
 
 const out = compileSources('tsc-ts-content-mapper-', [
   'compiler/content-mapper-protocol.ts',
@@ -27,6 +28,7 @@ const { getScriptKindFromFileName } = await load('compiler/parser.js');
 const { compilerOptionNames } = await load('compiler/options.js');
 const { optionDeclarations } = await load('compiler/option-declarations.js');
 const { toHex } = await load('compiler/xxh3.js');
+const paths = await load('compiler/path.js');
 const { messageCode } = await load('compiler/diagnostics.js');
 const { mapper, answer, assertSameAnswers } = createCases({
   ...mapperModule,
@@ -158,6 +160,61 @@ test('an output extension is found for a source extension, in any letter case wh
   assert.equal(getContentMapperOutputExtension(outputs, '.VUE', false), undefined);
   assert.equal(getContentMapperOutputExtension(outputs, '.VUE', true), '.js');
   assert.equal(getContentMapperOutputExtension(undefined, '.vue', true), undefined);
+});
+
+test('the longest of the extensions a path ends with is found as the path spells it', () => {
+  const extensions = ['.z', '.y.z', '.other'];
+  const { getLongestExtensionFromPath } = paths;
+  assert.equal(getLongestExtensionFromPath('/src/Component.y.z', extensions, true), '.y.z');
+  assert.equal(getLongestExtensionFromPath('/src/Component.z', extensions, true), '.z');
+  assert.equal(getLongestExtensionFromPath('/src/Component.y.Z', extensions, true), '');
+  assert.equal(getLongestExtensionFromPath('/src/Component.y.Z', extensions, false), '.y.Z');
+  assert.equal(getLongestExtensionFromPath('/src/Component.y.z/', ['y.z', 'z'], true), '.y.z');
+  assert.equal(getLongestExtensionFromPath('/src/Componenty.z', ['.y.z', 'ty.z'], true), '');
+});
+
+test('the rewrite with the longest source extension changes a module specifier', () => {
+  const { ExtensionRewrite, rewriteExtension, shouldRewriteExtension } = paths;
+  const rewrites = [new ExtensionRewrite('.z', '.js'), new ExtensionRewrite('.y.z', '.mjs')];
+  assert.equal(rewriteExtension('./Widget.y.z', rewrites, true), './Widget.mjs');
+  assert.equal(rewriteExtension('./Widget.Y.Z', rewrites, false), './Widget.mjs');
+  assert.equal(rewriteExtension('.y', rewrites, true), undefined);
+  assert.equal(rewriteExtension('.z', rewrites, true), undefined);
+  rewrites.push(new ExtensionRewrite('.identity.y.z', '.identity.y.z'));
+  assert.equal(rewriteExtension('./Widget.IDENTITY.Y.Z', rewrites, false), undefined);
+  assert.ok(!shouldRewriteExtension('./Widget.identity.y.z', rewrites, true));
+});
+
+test('a rewrite changes the extension of a file name unless it keeps it', () => {
+  const { ExtensionRewrite, getExtensionRewrite, rewriteExtension } = paths;
+  const identity = new ExtensionRewrite('.identity.y.z', '.identity.y.z');
+  const rewrites = [new ExtensionRewrite('.z', '.js'), new ExtensionRewrite('.y.z', '.mjs'), identity];
+  for (const [path, expected, useCaseSensitiveFileNames] of [
+    ['/src/Widget.y.z', '/src/Widget.mjs', true],
+    ['/src/Widget.Y.Z', '/src/Widget.mjs', false],
+    ['/src/Widget.Y.Z', undefined, true],
+    ['/src/Widget.IDENTITY.Y.Z', undefined, false],
+    ['/src/Widget.txt', undefined, true],
+  ])
+    assert.equal(rewriteExtension(path, rewrites, useCaseSensitiveFileNames), expected, path);
+  assert.equal(getExtensionRewrite('/src/Widget.IDENTITY.Y.Z', rewrites, false), identity);
+  assert.equal(getExtensionRewrite('/src/Widget.y.z', rewrites, true), rewrites[1]);
+  assert.equal(getExtensionRewrite('/src/Widget.txt', rewrites, true), undefined);
+});
+
+test('relative specifiers of mapped and TypeScript files are the ones to rewrite', () => {
+  const rewrites = [new paths.ExtensionRewrite('.astro', '.js')];
+  for (const [specifier, expected] of [
+    ['./Card.astro', true],
+    ['../Card.astro', true],
+    ['./file.ts', true],
+    ['./file.d.ts', false],
+    ['./file.d.astro.ts', false],
+    ['./file.js', false],
+    ['package.astro', false],
+    ['/Card.astro', false],
+  ])
+    assert.equal(paths.shouldRewriteExtension(specifier, rewrites, true), expected, specifier);
 });
 
 test('extensions of virtual files, valid extensions and reserved ones', () => {
@@ -689,6 +746,21 @@ const initialized = (encoding = 'utf-8') => ({ positionEncoding: encoding, diagn
 function mapped(transform, content = 'const a = 1;', rest = {}) {
   return { mapper: baseMapper, fileName: '/src/a.vue', content, initialize: initialized(), transform, ...rest };
 }
+
+test(
+  'the compiler options are the fields of tsgo in its order, runExternalCode among them',
+  { skip: !existsSync(tsgoOptions) && 'needs upstream/TypeScript' },
+  () => {
+    const struct = /^type CompilerOptions struct \{\n([^}]*)\}/m.exec(readFileSync(tsgoOptions, 'utf8'))[1];
+    const fields = Array.from(struct.matchAll(/`json:"(\w+),omitzero"`/g), (match) => match[1]);
+    assert.equal(fields.length, 132);
+    assert.deepEqual(compilerOptionNames, fields);
+    assert.equal(
+      mapperModule.marshalCompilerOptions({ all: false, runExternalCode: true, pprofDir: '/profiles' }),
+      '{"all":false,"runExternalCode":true,"pprofDir":"/profiles"}',
+    );
+  },
+);
 
 // The compiler options that no option declaration describes, and a value for each.
 const undeclaredOptions = {

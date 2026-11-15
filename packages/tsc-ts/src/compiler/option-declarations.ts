@@ -491,7 +491,6 @@ export const commonOptionsWithBuild: readonly OptionDeclaration[] = [
     minValue: 1,
   },
   {
-    // Content mappers aren't supported; the option is accepted and has no effect.
     name: 'runExternalCode',
     kind: 'boolean',
     isCommandLineOnly: true,

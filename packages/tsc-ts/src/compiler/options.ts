@@ -223,6 +223,7 @@ export interface CompilerOptions {
   build?: boolean;
   help?: boolean;
   all?: boolean;
+  runExternalCode?: boolean;
   pprofDir?: string;
   singleThreaded?: boolean;
   quiet?: boolean;
@@ -389,6 +390,7 @@ export const compilerOptionNames: readonly string[] = [
   'build',
   'help',
   'all',
+  'runExternalCode',
   'pprofDir',
   'singleThreaded',
   'quiet',
@@ -786,6 +788,9 @@ export function setCompilerOption(options: CompilerOptions, name: string, value:
     case 'all':
       options.all = value === true;
       break;
+    case 'runExternalCode':
+      options.runExternalCode = value === true;
+      break;
     case 'pprofDir':
       options.pprofDir = stringValue(value);
       break;
@@ -1117,6 +1122,7 @@ export function mergeCompilerOptions(
   target.build = merged(source.build, target.build, nulls, 'build');
   target.help = merged(source.help, target.help, nulls, 'help');
   target.all = merged(source.all, target.all, nulls, 'all');
+  target.runExternalCode = merged(source.runExternalCode, target.runExternalCode, nulls, 'runExternalCode');
   target.pprofDir = merged(source.pprofDir, target.pprofDir, nulls, 'pprofDir');
   target.singleThreaded = merged(source.singleThreaded, target.singleThreaded, nulls, 'singleThreaded');
   target.quiet = merged(source.quiet, target.quiet, nulls, 'quiet');
@@ -1386,6 +1392,8 @@ export function getCompilerOption(options: CompilerOptions, name: string): Compi
       return options.help;
     case 'all':
       return options.all;
+    case 'runExternalCode':
+      return options.runExternalCode;
     case 'pprofDir':
       return options.pprofDir;
     case 'singleThreaded':

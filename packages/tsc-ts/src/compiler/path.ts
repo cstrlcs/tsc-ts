@@ -710,6 +710,27 @@ export function getAnyExtensionFromPath(path: string): string {
   return index >= 0 ? base.slice(index) : '';
 }
 
+/**
+ * The longest of `extensions` that `path` ends with, as `path` spells it, or `''`. An extension counts with or
+ * without its leading `.`, and in any letter case when file names are not case sensitive.
+ */
+export function getLongestExtensionFromPath(
+  path: string,
+  extensions: readonly string[],
+  useCaseSensitiveFileNames: boolean,
+): string {
+  path = removeTrailingDirectorySeparator(path);
+  let longest = '';
+  for (const candidate of extensions) {
+    if (candidate.length <= longest.length) continue;
+    const extension = candidate.startsWith('.') ? candidate : '.' + candidate;
+    if (path.length < extension.length || path.charCodeAt(path.length - extension.length) !== DOT) continue;
+    const pathExtension = path.slice(path.length - extension.length);
+    if (equateStrings(pathExtension, extension, !useCaseSensitiveFileNames)) longest = pathExtension;
+  }
+  return longest;
+}
+
 /** Replaces a known extension of `path` with `newExtension`. */
 export function changeExtension(path: string, newExtension: string): string {
   const trimmed = removeTrailingDirectorySeparator(path);
@@ -734,4 +755,66 @@ export function getPossibleOriginalInputExtensionForExtension(path: string): rea
   const ext = getDeclarationFileExtension(path);
   if (ext !== '' && ext !== '.d.ts') return ['.' + ext.slice(3, ext.length - 3)];
   return ['.tsx', '.ts', '.jsx', '.js'];
+}
+
+//// Extension rewrites
+
+/**
+ * The extension of the files a content mapper reads and the extension their outputs have: `.vue` and `.js`. With
+ * the same extension on both sides the outputs keep their names.
+ */
+export class ExtensionRewrite {
+  constructor(
+    readonly source: string,
+    readonly target: string,
+  ) {}
+}
+
+/**
+ * The rewrite whose source extension `path` ends with, in any letter case when file names are not case sensitive.
+ * Of several the longest source decides, and a path that is only the extension has none.
+ */
+export function getExtensionRewrite(
+  path: string,
+  rewrites: readonly ExtensionRewrite[],
+  useCaseSensitiveFileNames: boolean,
+): ExtensionRewrite | undefined {
+  let best: ExtensionRewrite | undefined = undefined;
+  for (const rewrite of rewrites) {
+    const length = rewrite.source.length;
+    if (length <= (best === undefined ? 0 : best.source.length) || path.length <= length) continue;
+    if (equateStrings(path.slice(path.length - length), rewrite.source, !useCaseSensitiveFileNames)) best = rewrite;
+  }
+  return best;
+}
+
+/**
+ * A file name or module specifier with its extension replaced as `rewrites` say, or `undefined` when no rewrite
+ * applies or the one that does keeps the extension.
+ */
+export function rewriteExtension(
+  path: string,
+  rewrites: readonly ExtensionRewrite[],
+  useCaseSensitiveFileNames: boolean,
+): string | undefined {
+  const rewrite = getExtensionRewrite(path, rewrites, useCaseSensitiveFileNames);
+  if (rewrite === undefined || equateStrings(rewrite.source, rewrite.target, !useCaseSensitiveFileNames))
+    return undefined;
+  return path.slice(0, path.length - rewrite.source.length) + rewrite.target;
+}
+
+/**
+ * Whether `rewriteRelativeImportExtensions` rewrites the extension of a module specifier: a relative one that
+ * names no declaration file and ends with an extension `rewrites` change, or with a TypeScript extension when no
+ * rewrite applies.
+ */
+export function shouldRewriteExtension(
+  specifier: string,
+  rewrites: readonly ExtensionRewrite[],
+  useCaseSensitiveFileNames: boolean,
+): boolean {
+  if (!pathIsRelative(specifier) || isDeclarationFileName(specifier)) return false;
+  const rewrite = getExtensionRewrite(specifier, rewrites, useCaseSensitiveFileNames);
+  if (rewrite !== undefined) return !equateStrings(rewrite.source, rewrite.target, !useCaseSensitiveFileNames);
+  return hasTSFileExtension(specifier);
 }
