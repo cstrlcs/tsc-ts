@@ -1,4 +1,5 @@
-// Builds the reference scanner, parser, binder, checker, resolver, diagnostics, printer and span map drivers and the tsgo command line from upstream.
+// Builds the reference scanner, parser, binder, checker, resolver, diagnostics, printer, span map and content mapper
+// drivers and the tsgo command line from upstream.
 import { copyFileSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
@@ -35,6 +36,7 @@ for (const name of [
   'encode-oracle',
   'print-oracle',
   'spanmap-oracle',
+  'contentmapper-oracle',
 ]) {
   mkdirSync(root + '/cmd/' + name, { recursive: true });
   copyFileSync('oracles/' + name + '/main.go', root + '/cmd/' + name + '/main.go');
