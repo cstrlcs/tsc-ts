@@ -32,9 +32,11 @@ import type {
 /**
  * A program of `rootNames` with `options`, reading files through `host`. It loads its files as `tsc-ts`
  * loads a project's: resolving imports and references from the root files, with the default libraries of
- * the options from the host's default library directory.
+ * the options from the host's default library directory. It takes the parsed files of `oldProgram` that are
+ * unchanged.
  */
 export function createProgram(options: CreateProgramOptions): Program {
+  const oldProgram = compilerProgramOf(options.oldProgram);
   try {
     const host = options.host;
     const currentDirectory = host.getCurrentDirectory();
@@ -50,16 +52,20 @@ export function createProgram(options: CreateProgramOptions): Program {
       host.useCaseSensitiveFileNames(),
       rootNames.length,
     );
-    return programOf(config, host);
+    return programOf(config, host, oldProgram);
   } catch (e) {
     throw internalError(e);
   }
 }
 
-/** The program of a config file (`parseConfigFile`'s options and files), reading files through `host`. */
-export function createProgramFromConfigFile(configFileName: string, host: ProgramHost): Program {
+/**
+ * The program of a config file (`parseConfigFile`'s options and files), reading files through `host`. It takes the
+ * parsed files of `oldProgram` that are unchanged, as `createProgram` does.
+ */
+export function createProgramFromConfigFile(configFileName: string, host: ProgramHost, oldProgram?: Program): Program {
+  const old = compilerProgramOf(oldProgram);
   try {
-    return programOf(parsedConfig(configFileName, host).config, host);
+    return programOf(parsedConfig(configFileName, host).config, host, old);
   } catch (e) {
     throw internalError(e);
   }
@@ -109,10 +115,25 @@ function parsedConfig(
   return { config, errors: config.errors };
 }
 
-function programOf(config: ParsedCommandLine, host: ProgramHost): Program {
+function programOf(config: ParsedCommandLine, host: ProgramHost, oldProgram: CompilerProgram | undefined): Program {
   const fs = new CachedFileSystem(new HostFileSystem(host));
-  const compilerHost = new LibraryCompilerHost(fs, host.getCurrentDirectory(), host.getDefaultLibraryDirectory());
-  return new LibraryProgram(new CheckedProgram(new CompilerProgram(config, compilerHost)));
+  const compilerHost = new LibraryCompilerHost(
+    fs,
+    host.getCurrentDirectory(),
+    host.getDefaultLibraryDirectory(),
+    oldProgram,
+  );
+  const program = new CompilerProgram(config, compilerHost);
+  compilerHost.releaseOldProgram();
+  return new LibraryProgram(new CheckedProgram(program));
+}
+
+/** The compiler's program of an `oldProgram`, which must be a program of tsc-ts/api that is not disposed. */
+function compilerProgramOf(oldProgram: Program | undefined): CompilerProgram | undefined {
+  if (oldProgram === undefined) return undefined;
+  if (!(oldProgram instanceof LibraryProgram))
+    throw new TypeError('oldProgram must be a program created by tsc-ts/api');
+  return oldProgram.compilerProgram();
 }
 
 /**
@@ -136,6 +157,11 @@ class LibraryProgram implements Program {
   private get program(): CompilerProgram {
     this.checkNotDisposed();
     return this.checked.program;
+  }
+
+  /** The compiler's program, for a program that takes this one's files. */
+  compilerProgram(): CompilerProgram {
+    return this.program;
   }
 
   private checkNotDisposed(): void {

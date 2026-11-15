@@ -6,6 +6,7 @@ import { CompilerHost } from '../compiler/file-loader.js';
 import { DirectoryEntries, FileSystem } from '../compiler/file-system.js';
 import { takePreparedFile } from '../compiler/parallel-parse.js';
 import { parseSourceFile } from '../compiler/parser.js';
+import type { Program as CompilerProgram } from '../compiler/program.js';
 import type { ProgramHost } from './types.js';
 
 /**
@@ -88,9 +89,21 @@ export class ReplacedFileSystem extends FileSystem {
 
 /**
  * The compiler host of a program of tsc-ts's public API. A file that parse threads prepared, reading the disk, is
- * taken only when the host gives the same text for it; the program parses the host's text otherwise.
+ * taken only when the host gives the same text for it; the program parses the host's text otherwise. With an old
+ * program, the parsed and bound file of that program is taken when the file has the same name, path, module
+ * detection options and text, for which it parses the same, until `releaseOldProgram`.
  */
 export class LibraryCompilerHost extends CompilerHost {
+  constructor(
+    fs: FileSystem,
+    currentDirectory: string,
+    defaultLibraryPath: string,
+    /** The program whose files this host takes where they are unchanged. */
+    private oldProgram: CompilerProgram | undefined = undefined,
+  ) {
+    super(fs, currentDirectory, defaultLibraryPath);
+  }
+
   getSourceFile(
     fileName: string,
     path: string,
@@ -98,9 +111,23 @@ export class LibraryCompilerHost extends CompilerHost {
   ): SourceFile | undefined {
     const text = this.readFile(fileName);
     if (text === undefined) return undefined;
+    const old = this.oldProgram?.getSourceFileByPath(path);
+    if (
+      old !== undefined &&
+      old.fileName === fileName &&
+      old.text === text &&
+      old.externalModuleIndicatorOptions.jsx === externalModuleIndicatorOptions.jsx &&
+      old.externalModuleIndicatorOptions.force === externalModuleIndicatorOptions.force
+    )
+      return old;
     return (
       takePreparedFile(fileName, path, externalModuleIndicatorOptions, text) ??
       parseSourceFile(fileName, text, new ParseOptions(path, ScriptKind.Unknown, externalModuleIndicatorOptions))
     );
+  }
+
+  /** Stops taking files from the old program, once the new program has loaded, so that it doesn't keep the old one. */
+  releaseOldProgram(): void {
+    this.oldProgram = undefined;
   }
 }

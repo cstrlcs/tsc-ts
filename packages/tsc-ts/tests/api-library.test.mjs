@@ -802,6 +802,151 @@ test('getTextOfNode and getSourceFileOfNode give what TypeScript gives', { skip 
   assert.ok(compared > 300, `${compared} nodes compared`);
 });
 
+/**
+ * What a program answers for the files in `dir`: its files and their texts, its diagnostics, and the symbol and type
+ * at every node.
+ */
+function programAnswers(api, program, dir) {
+  const checker = program.getTypeChecker();
+  const result = { files: program.getSourceFileNames(), texts: [], diagnostics: {}, nodes: [] };
+  for (const kind of ['ConfigFileParsing', 'Program', 'Global', 'Syntactic', 'Bind', 'Semantic', 'Suggestion'])
+    result.diagnostics[kind] = program[`get${kind}Diagnostics`]();
+  for (const file of program.getSourceFiles()) {
+    if (!file.fileName.startsWith(dir)) continue;
+    result.texts.push(file.text);
+    api.walkPreorder(file, (node) => {
+      if (node === file) return;
+      const symbol = checker.getSymbolAtLocation(node);
+      const type = checker.getTypeAtLocation(node);
+      result.nodes.push(
+        `${file.fileName}:${node.kind}:${node.pos}-${node.end} ` +
+          `${symbol === undefined ? '-' : withoutSymbolId(api.symbolName(symbol))} ` +
+          `${type === undefined ? '-' : checker.typeToString(type)}`,
+      );
+    });
+  }
+  return result;
+}
+
+test(
+  'a program takes the unchanged files of oldProgram, as TypeScript 5 does',
+  { skip, timeout: 300_000 },
+  async () => {
+    const ts5 = (await import('typescript-5.9')).default;
+    const api = await load('library/index.js');
+    const dir = realpathSync(tempDir('tsc-ts-library-'));
+    cpSync(join(root, 'tests/fixtures/library'), dir, { recursive: true });
+    const config = join(dir, 'tsconfig.json');
+    const main = join(dir, 'src/main.ts');
+    const types = join(dir, 'src/types.ts');
+    const extra = join(dir, 'src/extra.ts');
+    const mainText = readFileSync(main, 'utf8');
+
+    // TypeScript 5 creates each program of a language service with the last one as `oldProgram`, through a host that
+    // keeps the files whose version is the same: the program reference for which files a new program takes.
+    const versions = new Map();
+    const write = (fileName, text) => {
+      writeFileSync(fileName, text);
+      versions.set(fileName, (versions.get(fileName) ?? 0) + 1);
+    };
+    const parsed = () =>
+      ts5.parseJsonConfigFileContent(ts5.readConfigFile(config, ts5.sys.readFile).config, ts5.sys, dir);
+    const service = ts5.createLanguageService({
+      getCompilationSettings: () => parsed().options,
+      getScriptFileNames: () => parsed().fileNames,
+      getScriptVersion: (fileName) => String(versions.get(fileName) ?? 0),
+      getScriptSnapshot: (fileName) =>
+        existsSync(fileName) ? ts5.ScriptSnapshot.fromString(readFileSync(fileName, 'utf8')) : undefined,
+      getCurrentDirectory: () => dir,
+      getDefaultLibFileName: (options) => ts5.getDefaultLibFilePath(options),
+      fileExists: ts5.sys.fileExists,
+      readFile: ts5.sys.readFile,
+      readDirectory: ts5.sys.readDirectory,
+      directoryExists: ts5.sys.directoryExists,
+      getDirectories: ts5.sys.getDirectories,
+    });
+    /** For each file of `program` in the project, whether it is the file `old` has; and whether every other is. */
+    const taken = (program, old, isLibrary) => {
+      const own = {};
+      let libraries = true;
+      for (const file of program.getSourceFiles()) {
+        const same = old.getSourceFile(file.fileName) === file;
+        if (isLibrary(file)) libraries &&= same;
+        else own[file.fileName] = same;
+      }
+      return { own, libraries };
+    };
+    const steps = [];
+    let program = api.createProgramFromConfigFile(config, hostFor(dir));
+    let reference = service.getProgram();
+    const next = (expected) => {
+      const old = program;
+      program = api.createProgramFromConfigFile(config, hostFor(dir), old);
+      const oldReference = reference;
+      reference = service.getProgram();
+      const answer = taken(program, old, (file) => program.isSourceFileDefaultLibrary(file));
+      assert.deepEqual(
+        answer,
+        taken(reference, oldReference, (file) => reference.isSourceFileDefaultLibrary(file)),
+      );
+      assert.deepEqual(answer, { own: expected, libraries: true });
+      // The same answers as a program that parsed every file, and the old program answers as before.
+      const scratch = api.createProgramFromConfigFile(config, hostFor(dir));
+      assert.deepEqual(programAnswers(api, program, dir), programAnswers(api, scratch, dir));
+      scratch.dispose();
+      steps.push(old);
+    };
+
+    // An edit to the body of a file: that file is parsed, the file it imports and the libraries are taken.
+    const before = programAnswers(api, program, dir);
+    write(main, mainText + "export const added: number = 'text';\n");
+    next({ [main]: false, [types]: true });
+    assert.ok(program.getSemanticDiagnostics(program.getSourceFile(main)).some((d) => d.code === 2322));
+    assert.deepEqual(programAnswers(api, steps[0], dir), before);
+    // An edit that imports a new file, which changes the program's structure: the other files are still taken.
+    write(extra, 'export const extra = 1;\n');
+    write(main, "import { extra } from './extra.js';\n" + mainText + 'extra;\n');
+    next({ [main]: false, [types]: true, [extra]: false });
+    // An edit to a file that another imports: the importing file is taken, and checked against the new text.
+    write(types, readFileSync(types, 'utf8').replace('readonly x: number;', 'readonly x: string;'));
+    next({ [main]: true, [types]: false, [extra]: true });
+    assert.ok(program.getSemanticDiagnostics(program.getSourceFile(main)).length > 0);
+    // No edit: every file is taken.
+    next({ [main]: true, [types]: true, [extra]: true });
+
+    // The new program does not depend on the old ones, which are disposed of on their own.
+    const answers = programAnswers(api, program, dir);
+    for (const old of steps) old.dispose();
+    assert.deepEqual(programAnswers(api, program, dir), answers);
+
+    // createProgram takes them too, but not with other module detection options, under which a file parses differently
+    // unless it is a declaration file.
+    const options = program.getCompilerOptions();
+    const rootNames = [main, types, extra];
+    const withOptions = api.createProgram({ rootNames, options, host: hostFor(dir), oldProgram: program });
+    assert.ok(withOptions.getSourceFiles().every((file) => program.getSourceFile(file.fileName) === file));
+    assert.deepEqual(programAnswers(api, withOptions, dir), answers);
+    const detection = { ...options, module: api.ModuleKind.ESNext, moduleResolution: api.ModuleResolutionKind.Bundler };
+    const other = api.createProgram({ rootNames, options: detection, host: hostFor(dir), oldProgram: program });
+    assert.deepEqual(
+      taken(other, program, (file) => other.isSourceFileDefaultLibrary(file)),
+      { own: { [main]: false, [types]: false, [extra]: false }, libraries: true },
+    );
+    const scratch = api.createProgram({ rootNames, options: detection, host: hostFor(dir) });
+    assert.deepEqual(programAnswers(api, other, dir), programAnswers(api, scratch, dir));
+
+    // An old program must be one of tsc-ts/api that is not disposed.
+    assert.throws(() => api.createProgram({ rootNames, options, host: hostFor(dir), oldProgram: {} }), TypeError);
+    assert.throws(() => api.createProgramFromConfigFile(config, hostFor(dir), {}), TypeError);
+    program.dispose();
+    assert.throws(
+      () => api.createProgram({ rootNames, options, host: hostFor(dir), oldProgram: program }),
+      api.DisposedProgramError,
+    );
+    assert.throws(() => api.createProgramFromConfigFile(config, hostFor(dir), program), api.DisposedProgramError);
+  },
+);
+
 test('a program takes a file parse threads prepared only when the host gives the same text', { skip }, async () => {
   const api = await load('library/index.js');
   const { parallelParse, PreparedFile } = await load('compiler/parallel-parse.js');

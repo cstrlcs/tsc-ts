@@ -281,6 +281,13 @@ export interface CreateProgramOptions {
   readonly rootNames: readonly string[];
   readonly options: CompilerOptions;
   readonly host: ProgramHost;
+  /**
+   * A program created by tsc-ts/api whose parsed files the new program takes instead of parsing them again, where a
+   * file has the same name, module detection options and text, as TypeScript 5's `oldProgram` with a host that keeps
+   * unchanged files. The new program resolves its modules and checks anew, and the old one stays usable. A disposed
+   * old program throws a DisposedProgramError.
+   */
+  readonly oldProgram?: Program | undefined;
 }
 
 /** A config file's options and files, as `tsc-ts --api`'s parseConfigFile returns them. */

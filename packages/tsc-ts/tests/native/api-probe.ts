@@ -1,6 +1,7 @@
 // Prints tsc-ts/api's answers for a project, one line each: its files and diagnostics, the symbol, types and
 // signatures at every node of its files outside the default libraries, and the answers of the program with its last
-// file updated. The same answers are expected from a Node build and a native build of this file.
+// file updated and of a program that takes its files. The same answers are expected from a Node build and a native
+// build of this file.
 // Usage: api-probe <tsconfig.json> <default library directory>
 import {
   createProgramFromConfigFile,
@@ -149,6 +150,15 @@ function probeUpdate(program: Program): void {
   updated.dispose();
 }
 
+/** How many files `next`, a program created with `program` as its old program, took from it, and its diagnostics. */
+function probeOldProgram(program: Program, next: Program): void {
+  let taken = 0;
+  for (const file of next.getSourceFiles()) if (program.getSourceFile(file.fileName) === file) taken += 1;
+  print(`old program ${next.getSourceFiles().length} files ${taken} taken`);
+  for (const d of next.getSemanticDiagnostics()) print(`  semantic ${diagnosticText(d)}`);
+  next.dispose();
+}
+
 function isTupleTypeReference(type: Type): type is TupleTypeReference {
   return type.isTypeReference() && type.getTarget().isTupleType();
 }
@@ -164,13 +174,15 @@ const configFileName = args[0]!;
 const libDir = args[1]!;
 const directory = configFileName.substring(0, configFileName.lastIndexOf('/'));
 print('start');
-const program = createProgramFromConfigFile(configFileName, {
+const host = {
   getCurrentDirectory: () => directory,
   useCaseSensitiveFileNames: () => true,
   getDefaultLibraryDirectory: () => libDir,
-});
+};
+const program = createProgramFromConfigFile(configFileName, host);
 probe(program, program.getTypeChecker());
 probeUpdate(program);
+probeOldProgram(program, createProgramFromConfigFile(configFileName, host, program));
 const parsed = parseSourceFile(directory + '/parsed.ts', 'export const parsed = 1;\n');
 print(`parsed ${parsed.statements.nodes.length} ${parsed.statements.nodes[0]!.kind}`);
 try {
