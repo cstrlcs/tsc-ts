@@ -21,7 +21,7 @@ import {
 import { CompilerHost, FileLoader, releaseLater } from './file-loader.js';
 import { CachedFileSystem, FileSystem, type DirectoryEntries } from './file-system.js';
 import { Program, sortAndDeduplicateDiagnostics } from './program.js';
-import { ConfigParser, ParsedCommandLine as ProjectConfig } from './tsconfig.js';
+import { ConfigParser, JsonObject, ParsedCommandLine as ProjectConfig } from './tsconfig.js';
 import {
   CommandLineHost,
   parseBuildCommandLine,
@@ -640,6 +640,8 @@ function showConfigInput(config: ProjectConfig, sys: System): ShowConfigInput {
     references: config.projectReferences,
     include,
     exclude: specs?.validatedExcludeSpecs,
+    // The config file's own `compileOnSave`, or the one of a config it extends (`ParsedCommandLine.raw`).
+    compileOnSave: config.raw instanceof JsonObject && config.raw.entries.get('compileOnSave') === true,
   };
 }
 

@@ -34,6 +34,16 @@ export function fixtureProjects() {
     'main.ts': 'export {};\n',
     'b/ignored.ts': 'export {};\n',
   });
+  add(
+    'extends-compile-on-save',
+    {
+      'tsconfig.json': json({ extends: './base.json', files: ['a.ts'] }),
+      'base.json': json({ compileOnSave: true }),
+      'own.json': json({ extends: './base.json', compileOnSave: false, files: ['a.ts'] }),
+      'a.ts': 'export {};\n',
+    },
+    [['--showConfig'], ['-p', 'own.json', '--showConfig'], ['-p', 'base.json', '--showConfig']],
+  );
   add('extends-array', {
     'tsconfig.json': json({ extends: ['./one.json', './two.json'], compilerOptions: { noEmit: true } }),
     'one.json': json({ compilerOptions: { target: 'es2018', module: 'commonjs' }, exclude: ['skip'] }),
@@ -676,13 +686,6 @@ const differingRuns = [
     arg: '--listFilesOnly',
     difference:
       /^stdout line \d+: tsgo "[^"]*: error TS18068: [^"]*", ours (undefined|"[^"]*")(\nstatus tsgo 1, ours 0)?$/,
-  },
-  // tsc-ts leaves a config file's `compileOnSave` out of what --showConfig prints: the `]` that closes `exclude`
-  // is followed by `"compileOnSave": true` in tsgo's.
-  {
-    name: /^compiler\/maxNodeModuleJsDepthDefaultsToZero\.ts$/,
-    arg: '--showConfig',
-    difference: /^stdout line 13: tsgo " {4}\],", ours " {4}\]"$/,
   },
 ];
 
