@@ -37,12 +37,13 @@ export interface TextRange {
 /**
  * A node. `pos` is where the node's leading trivia starts and `end` where the node ends, as UTF-16
  * offsets into the file's text; `tokenStartOfNode` gives the start of its first token. `parent` is the
- * enclosing node, and the source file for its statements; a source file's `parent` is undefined.
+ * enclosing node, and the source file for its statements. A source file is the root of its tree: its
+ * `parent` is undefined, although it is typed as a node like every other, as in TypeScript 7's API.
  */
 export interface Node extends TextRange {
   readonly kind: SyntaxKind;
   readonly flags: NodeFlags;
-  readonly parent: Node | undefined;
+  readonly parent: Node;
 }
 
 /** The children of a node in one list: `nodes`, and the range from the list's opening to its closing token. */

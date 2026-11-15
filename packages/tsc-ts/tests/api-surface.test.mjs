@@ -323,6 +323,19 @@ test(
   },
 );
 
+test("a node's parent is declared a node, as in TypeScript 7's API", () => {
+  const { checker, symbols } = exportsOfApi();
+  let interfaces = 0;
+  for (const symbol of symbols) {
+    if ((symbol.flags & ts.SymbolFlags.Interface) === 0) continue;
+    const parent = checker.getDeclaredTypeOfSymbol(symbol).getProperty('parent');
+    if (parent === undefined) continue;
+    interfaces++;
+    assert.equal(checker.typeToString(checker.getTypeOfSymbol(parent)), 'Node', symbol.name);
+  }
+  assert.ok(interfaces > 200, `${interfaces} node interfaces`);
+});
+
 test('symbolName gives the names TypeScript 7 API gives', async () => {
   const { symbolName, InternalSymbolName } = await import(
     pathToFileURL(join(root, 'dist/tsc-ts/src/library/index.js')).href

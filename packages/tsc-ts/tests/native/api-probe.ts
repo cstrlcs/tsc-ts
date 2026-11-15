@@ -114,7 +114,7 @@ function probe(program: Program, checker: TypeChecker): void {
       if (node === file) return;
       const symbol = checker.getSymbolAtLocation(node);
       if (symbol !== undefined) symbols.push(symbol);
-      print(`node ${nodeText(node)} symbol ${symbolText(symbol)}`);
+      print(`node ${nodeText(node)} in ${node.parent.kind} symbol ${symbolText(symbol)}`);
       print(`  text ${JSON.stringify(getTextOfNode(node).substring(0, 60))} ${getSourceFileOfNode(node) === file}`);
       if (node.kind === SyntaxKind.StringLiteral || node.kind === SyntaxKind.NoSubstitutionTemplateLiteral)
         print(`  string ${JSON.stringify((node as StringLiteralLike).text)}`);
