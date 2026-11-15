@@ -44,10 +44,12 @@ The default lib files (`lib.*.d.ts`) ship next to the executable. Set `TSC_TS_LI
 `tsc-ts/api` describes tsc-ts's programs, checkers, nodes, symbols, types and signatures in TypeScript, with the names and numbering of TypeScript 7's API (`typescript/unstable/sync`): the node interfaces, `Symbol`, `Type` and its kinds, `Signature`, `IndexInfo`, `TypePredicate`, `Diagnostic`, `Program`, `TypeChecker`, `CompilerOptions`, and the enums `SyntaxKind`, `NodeFlags`, `ModifierFlags`, `TokenFlags`, `SymbolFlags`, `TypeFlags`, `ObjectFlags`, `ElementFlags`, `SignatureFlags`, `SignatureKind`, `IndexKind`, `TypePredicateKind`, `TypeFormatFlags`, `NodeBuilderFlags`, `ScriptTarget`, `ModuleKind`, `ModuleResolutionKind`, `ModuleDetectionKind`, `ScriptKind`, `LanguageVariant`, `JsxEmit`, `NewLineKind`, `DiagnosticCategory` and `InternalSymbolName`.
 
 ```ts
-import { SyntaxKind, type Node } from 'tsc-ts/api';
+import { isIdentifier, type Node } from 'tsc-ts/api';
 
-const isIdentifier = (node: Node): boolean => node.kind === SyntaxKind.Identifier;
+const nameOf = (node: Node): string | undefined => (isIdentifier(node) ? node.text : undefined);
 ```
+
+Each node interface that has kinds of its own has a type guard named after it, as in TypeScript 7's API: `isIdentifier(node)`, `isCallExpression(node)`, `isVariableDeclaration(node)` and so on. A guard answers by the node's kind; `isImportDeclaration` and `isTypeAliasDeclaration` also accept the declarations a JSDoc `@import` or `@typedef` makes in a JavaScript file (`SyntaxKind.JSImportDeclaration`, `SyntaxKind.JSTypeAliasDeclaration`), as TypeScript 7's do.
 
 Lists of child nodes are `NodeList` objects: `node.arguments.nodes` holds the nodes, and `pos` and `end` the list's range. `symbolName(symbol)` gives a symbol's name as TypeScript 7's API does (`__call`, `export=`).
 

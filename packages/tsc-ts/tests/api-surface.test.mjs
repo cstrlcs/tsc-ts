@@ -1,8 +1,8 @@
 // tsc-ts/api's types (src/library) against tsc-ts's own objects: the generated files are current, the
-// public enums give tsc-ts's values for every member tsc-ts has, and tsc-ts's nodes hold what their API
+// public enums give tsc-ts's values for every member tsc-ts has, tsc-ts's nodes hold what their API
 // interfaces declare (scripts/generate-api.mjs): every required member, nothing in a member declared
 // undefined, one of the declared kinds in a member typed by kinds, and lists of NodeList shape with
-// parents set.
+// parents set, and each node guard answers for the nodes of its interface.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -84,10 +84,10 @@ test('the public enums number kinds and flags as tsc-ts does', () => {
 });
 
 /**
- * The members of each node kind as tsc-ts/api declares them, inherited ones included: whether a node may
- * leave a member undefined, whether it must, and whether it holds a NodeList or ModifierList.
+ * The node interfaces tsc-ts/api exports that have one kind: the interface's name and type, its kind, and
+ * whether it declares the kind itself or takes it from the interface it extends.
  */
-function declaredMembers(SyntaxKind) {
+function nodeInterfaces(SyntaxKind) {
   const index = join(root, 'src/library/index.ts');
   const program = ts.createProgram([index], {
     noEmit: true,
@@ -98,8 +98,7 @@ function declaredMembers(SyntaxKind) {
     types: [],
   });
   const checker = program.getTypeChecker();
-  const isUndefined = (t) => (t.flags & ts.TypeFlags.Undefined) !== 0;
-  const membersOfKind = new Map();
+  const interfaces = [];
   for (const exported of checker.getExportsOfModule(checker.getSymbolAtLocation(program.getSourceFile(index)))) {
     const symbol = exported.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(exported) : exported;
     if ((symbol.flags & ts.SymbolFlags.Interface) === 0) continue;
@@ -108,6 +107,21 @@ function declaredMembers(SyntaxKind) {
     if (kindProperty === undefined) continue;
     const kindType = checker.getTypeOfSymbol(kindProperty);
     if (kindType.isUnion() || kindType.symbol === undefined || SyntaxKind[kindType.symbol.name] === undefined) continue;
+    const declaresKind = symbol.declarations.includes(kindProperty.valueDeclaration.parent);
+    interfaces.push({ name: symbol.name, type, kind: SyntaxKind[kindType.symbol.name], declaresKind });
+  }
+  return { checker, interfaces };
+}
+
+/**
+ * The members of each node kind as tsc-ts/api declares them, inherited ones included: whether a node may
+ * leave a member undefined, whether it must, and whether it holds a NodeList or ModifierList.
+ */
+function declaredMembers(SyntaxKind) {
+  const { checker, interfaces } = nodeInterfaces(SyntaxKind);
+  const isUndefined = (t) => (t.flags & ts.TypeFlags.Undefined) !== 0;
+  const membersOfKind = new Map();
+  for (const { type, kind } of interfaces) {
     const members = [];
     for (const property of checker.getPropertiesOfType(type)) {
       if (['kind', 'flags', 'pos', 'end', 'parent'].includes(property.name)) continue;
@@ -131,7 +145,7 @@ function declaredMembers(SyntaxKind) {
         values,
       });
     }
-    membersOfKind.set(SyntaxKind[kindType.symbol.name], members);
+    membersOfKind.set(kind, members);
   }
   return membersOfKind;
 }
@@ -207,6 +221,59 @@ test(
       );
     assert.deepEqual([...failures].sort(), []);
     assert.ok(seen.size > 250, `${seen.size} kinds seen`);
+  },
+);
+
+test(
+  'each node guard answers for the nodes of its interface',
+  { skip: noUpstream || (!existsSync(parserPath) && 'run npm run build') },
+  async () => {
+    const { parseSourceFile } = await import(pathToFileURL(parserPath).href);
+    const api = await import(pathToFileURL(join(root, 'dist/tsc-ts/src/library/index.js')).href);
+    const guards = await import(pathToFileURL(join(root, 'dist/tsc-ts/src/library/is.generated.js')).href);
+    const { SyntaxKind } = api;
+    // The kinds each guard answers for: the kind of its interface, and for import and type alias declarations
+    // also the kind of the declaration a JSDoc `@import` or `@typedef` makes, as TypeScript 7's guards do.
+    const jsDocForms = new Map([
+      ['ImportDeclaration', SyntaxKind.JSImportDeclaration],
+      ['TypeAliasDeclaration', SyntaxKind.JSTypeAliasDeclaration],
+    ]);
+    const kindsOfGuard = new Map();
+    for (const { name, kind, declaresKind } of nodeInterfaces(SyntaxKind).interfaces)
+      if (declaresKind) kindsOfGuard.set(`is${name}`, [kind, ...(jsDocForms.has(name) ? [jsDocForms.get(name)] : [])]);
+    assert.deepEqual(Object.keys(guards).sort(), [...kindsOfGuard.keys()].sort());
+
+    // A node of each kind in every 25th test case, tokens, lists and JSDoc included.
+    const files = [];
+    const walk = (dir) => {
+      for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+        const path = join(dir, entry.name);
+        if (entry.isDirectory()) walk(path);
+        else if (/\.(ts|tsx|js|jsx)$/.test(entry.name)) files.push(path);
+      }
+    };
+    walk(cases);
+    const nodeOfKind = new Map();
+    for (const path of files.filter((_, i) => i % 25 === 0)) {
+      const file = parseSourceFile(path, readFileSync(path, 'utf8'));
+      const stack = [file];
+      while (stack.length > 0) {
+        const node = stack.pop();
+        if (!nodeOfKind.has(node.kind)) nodeOfKind.set(node.kind, node);
+        stack.push(...api.getChildren(node, file));
+      }
+    }
+    assert.ok(nodeOfKind.size > 280, `${nodeOfKind.size} kinds seen`);
+
+    const failures = [];
+    const kinds = new Set(Object.values(SyntaxKind).filter((value) => typeof value === 'number'));
+    for (const kind of kinds) {
+      // A kind the parser never makes is tried on an object of that kind.
+      const node = nodeOfKind.get(kind) ?? { kind };
+      for (const [name, guard] of Object.entries(guards))
+        if (guard(node) !== kindsOfGuard.get(name).includes(kind)) failures.push(`${name}(${SyntaxKind[kind]})`);
+    }
+    assert.deepEqual(failures, []);
   },
 );
 

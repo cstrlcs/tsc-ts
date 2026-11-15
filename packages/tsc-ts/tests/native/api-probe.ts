@@ -18,6 +18,11 @@ import {
   getTextOfNode,
   getTrailingCommentRanges,
   InternalCompilerError,
+  isCallExpression,
+  isIdentifier,
+  isImportDeclaration,
+  isPropertyAccessExpression,
+  isVariableDeclaration,
   type Node,
   parseSourceFile,
   type Program,
@@ -104,6 +109,11 @@ function probe(program: Program, checker: TypeChecker): void {
       print(`  text ${JSON.stringify(getTextOfNode(node).substring(0, 60))} ${getSourceFileOfNode(node) === file}`);
       if (node.kind === SyntaxKind.StringLiteral || node.kind === SyntaxKind.NoSubstitutionTemplateLiteral)
         print(`  string ${JSON.stringify((node as StringLiteralLike).text)}`);
+      if (isIdentifier(node)) print(`  identifier ${node.text}`);
+      if (isCallExpression(node)) print(`  call ${nodeText(node.expression)} ${node.arguments.nodes.length}`);
+      if (isPropertyAccessExpression(node)) print(`  property access ${nodeText(node.name)}`);
+      if (isVariableDeclaration(node)) print(`  variable ${nodeText(node.name)} ${nodeText(node.initializer)}`);
+      if (isImportDeclaration(node)) print(`  import ${nodeText(node.moduleSpecifier)}`);
       print(`  children ${childrenText(node)}`);
       print(`  tokens ${nodeText(getFirstToken(node))} ${nodeText(getLastToken(node, file))}`);
       print(`  type ${keep(checker.getTypeAtLocation(node))}`);

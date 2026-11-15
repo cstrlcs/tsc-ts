@@ -3,6 +3,7 @@
 
 export * from './ast.js';
 export * from './enums.generated.js';
+export * from './is.generated.js';
 export type { CompilerOptions } from './compiler-options.generated.js';
 export { symbolName } from './symbols.js';
 export { createProgram, createProgramFromConfigFile, getPreEmitDiagnostics, parseConfigFile } from './program.js';

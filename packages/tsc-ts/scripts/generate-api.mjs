@@ -10,6 +10,9 @@
 //                                              NodeList and ModifierList in place of NodeArray, without
 //                                              brand members, and with members typed as tsc-ts's nodes
 //                                              hold them
+//   src/library/is.generated.ts                the type guards of the node interfaces, from the same schema,
+//                                              as tools/scripts/tsc/generate-ts-ast.ts generates TypeScript 7's
+//                                              is.generated.ts
 //
 // Usage: node scripts/generate-api.mjs [--check]
 //
@@ -117,8 +120,8 @@ const memberTypes = new Map([
   ['ModuleDeclaration.Keyword', 'SyntaxKind.ModuleKeyword | SyntaxKind.NamespaceKeyword | SyntaxKind.GlobalKeyword'],
 ]);
 
-// The node interfaces. The functions below follow tools/scripts/tsc/generate-ts-ast.ts (generateAstGenerated).
-async function generateAst() {
+// The schema model of ast.json (tools/scripts/tsc/schema.ts).
+async function loadSchema() {
   // schema.ts takes the repository root from tools/scripts/gen/utils.mts, whose own imports are not
   // installed here; a copy of it gets the root directly.
   const schemaDir = mkdtempSync(join(tmpdir(), 'tsc-ts-schema-'));
@@ -127,12 +130,18 @@ async function generateAst() {
   const rootImport = 'import { repoRoot as ROOT } from "../gen/utils.mts";';
   if (!schemaText.includes(rootImport)) throw new Error('schema.ts no longer imports repoRoot from gen/utils.mts');
   writeFileSync(schemaCopy, schemaText.replace(rootImport, `const ROOT = ${JSON.stringify(upstream)};`));
-  let api;
   try {
-    ({ api } = await import(pathToFileURL(schemaCopy).href));
+    return (await import(pathToFileURL(schemaCopy).href)).api;
   } finally {
     rmSync(schemaDir, { recursive: true, force: true });
   }
+}
+
+// A node whose kinds each get an interface of their own (CaseClause and DefaultClause).
+const isVariantNode = (node) => node.isMultiKind() && node.kindType.kind !== 'typeParameter';
+
+// The node interfaces. The functions below follow tools/scripts/tsc/generate-ts-ast.ts (generateAstGenerated).
+function generateAst(api) {
   const someList = api
     .nodes()
     .flatMap((node) => node.members)
@@ -158,7 +167,6 @@ async function generateAst() {
     name === 'text' && type.kind === 'list' && type.listKind === 'raw'
       ? type.elementType.formatTypeScript()
       : undefined;
-  const isVariantNode = (node) => node.isMultiKind() && node.kindType.kind !== 'typeParameter';
   const goOnlyBases = new Set(
     api
       .bases()
@@ -298,10 +306,37 @@ async function generateAst() {
   return header + body + '\n';
 }
 
+// The type guards of the node interfaces that have their own kinds, as generate-ts-ast.ts generates them
+// (generateIsGenerated): named `is` and the interface's name, and true for each kind of the interface's
+// node, which for import and type alias declarations includes the kind of their JSDoc form.
+function generateIs(api) {
+  const guards = [];
+  for (const node of api.nodes()) {
+    if (isVariantNode(node) || node.kindType.kind === 'typeParameter') continue;
+    guards.push({ name: node.name, kinds: node.allKinds().map((kind) => kind.formatTypeScript()) });
+  }
+  for (const node of api.nodes())
+    if (isVariantNode(node))
+      for (const kind of node.kindTypes()) guards.push({ name: kind.name, kinds: [`SyntaxKind.${kind.name}`] });
+  const types = ['Node', ...guards.map((guard) => guard.name)].sort();
+  const header =
+    notice('TypeScript tools/scripts/tsc/ast.json') +
+    `\nimport type { ${types.join(', ')} } from './ast.js';\n` +
+    `import { SyntaxKind } from './enums.generated.js';\n\n`;
+  const functions = guards.map(
+    ({ name, kinds }) =>
+      `export function is${name}(node: Node): node is ${name} {\n` +
+      `  return ${kinds.map((kind) => `node.kind === ${kind}`).join(' || ')};\n}\n`,
+  );
+  return header + functions.join('\n');
+}
+
+const api = await loadSchema();
 const outputs = [
   ['enums.generated.ts', generateEnums()],
   ['compiler-options.generated.ts', generateCompilerOptions()],
-  ['ast.generated.ts', await generateAst()],
+  ['ast.generated.ts', generateAst(api)],
+  ['is.generated.ts', generateIs(api)],
 ];
 let stale = false;
 for (const [name, content] of outputs) {
