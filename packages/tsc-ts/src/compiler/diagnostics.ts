@@ -903,24 +903,28 @@ export function resolveDiagnosticLocation(diagnostic: Diagnostic): DiagnosticLoc
 
 /**
  * For a compiler diagnostic that lies entirely in text a content mapper synthesized, which has no place in
- * the original text, the line at `level` that says the location shown is in virtual code and names the
- * mapper; `''` for any other diagnostic.
+ * the original text, the message that says the location shown is in virtual code and names the mapper;
+ * `undefined` for any other diagnostic. It ends the chain of the diagnostic, as text and in the API.
  */
-function synthesizedTextNote(diagnostic: Diagnostic, newLine: string, locale: Locale, level: number): string {
+export function synthesizedTextNote(diagnostic: Diagnostic): Diagnostic | undefined {
   const file = diagnostic.file;
-  if (file === undefined || file.mapped === undefined || diagnostic.source !== '') return '';
+  if (file === undefined || file.mapped === undefined || diagnostic.source !== '') return undefined;
   const mapped = file.mapped;
   if (
     mapped.spanMap === undefined ||
     mapped.spanMap.virtualToOriginalSpan(diagnostic.pos, diagnostic.end).fidelity !== SpanMapFidelity.None
   )
-    return '';
-  const note = localizeMessage(
-    locale,
+    return undefined;
+  return createCompilerDiagnostic(
     Diagnostics.This_location_is_in_virtual_code_produced_by_the_content_mapper_0_and_has_no_corresponding_location_in_the_original_file,
-    [mapped.contentMapper],
+    mapped.contentMapper,
   );
-  return newLine + '  '.repeat(level) + note;
+}
+
+/** The line at `level` with the note on a diagnostic in synthesized text, or `''` for any other diagnostic. */
+function synthesizedTextNoteLine(diagnostic: Diagnostic, newLine: string, locale: Locale, level: number): string {
+  const note = synthesizedTextNote(diagnostic);
+  return note === undefined ? '' : newLine + '  '.repeat(level) + note.localize(locale);
 }
 
 function flattenChain(chain: readonly Diagnostic[], newLine: string, locale: Locale, level: number): string {
@@ -928,7 +932,7 @@ function flattenChain(chain: readonly Diagnostic[], newLine: string, locale: Loc
   for (const entry of chain) {
     result += newLine + '  '.repeat(level) + entry.localize(locale);
     result += flattenChain(entry.messageChain, newLine, locale, level + 1);
-    result += synthesizedTextNote(entry, newLine, locale, level + 1);
+    result += synthesizedTextNoteLine(entry, newLine, locale, level + 1);
   }
   return result;
 }
@@ -941,7 +945,7 @@ export function flattenDiagnosticMessage(diagnostic: Diagnostic, newLine: string
   return (
     diagnostic.localize(locale) +
     flattenChain(diagnostic.messageChain, newLine, locale, 1) +
-    synthesizedTextNote(diagnostic, newLine, locale, 1)
+    synthesizedTextNoteLine(diagnostic, newLine, locale, 1)
   );
 }
 

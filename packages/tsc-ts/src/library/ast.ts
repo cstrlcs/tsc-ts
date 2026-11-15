@@ -27,9 +27,23 @@ import type {
   Token,
   VariableDeclaration,
 } from './ast.generated.js';
-import type { LanguageVariant, ModifierFlags, NodeFlags, ScriptKind, SyntaxKind } from './enums.generated.js';
+import type {
+  DiagnosticDirectivePolicy,
+  LanguageVariant,
+  ModifierFlags,
+  NodeFlags,
+  ScriptKind,
+  SyntaxKind,
+} from './enums.generated.js';
+import type { SpanMap } from './span-map.js';
 
 export interface TextRange {
+  readonly pos: number;
+  readonly end: number;
+}
+
+/** A range of a text, as UTF-16 offsets: TypeScript 7's name for a range that is only read. */
+export interface ReadonlyTextRange {
   readonly pos: number;
   readonly end: number;
 }
@@ -73,11 +87,42 @@ export interface LineAndCharacter {
   readonly character: number;
 }
 
+/**
+ * A directive of the original text of a file a content mapper produced, such as a framework's
+ * `@ts-expect-error`: the TypeScript diagnostics that start in `virtualRange` of the file's text are not
+ * reported, and a directive with the policy `Expect` that suppresses none is itself reported, at
+ * `originalRange`, with the code `unusedCode`.
+ */
+export interface MappedDiagnosticDirective {
+  readonly originalRange: ReadonlyTextRange;
+  readonly virtualRange: ReadonlyTextRange;
+  readonly policy: DiagnosticDirectivePolicy;
+  readonly unusedCode: number;
+}
+
 export interface SourceFile extends Node {
   readonly kind: SyntaxKind.SourceFile;
   readonly statements: NodeList<Statement>;
   readonly endOfFileToken: EndOfFile;
+  /** The text the file's nodes are positions of. For a file a content mapper produced it is the virtual text. */
   readonly text: string;
+  /** The text a content mapper transformed into `text`; `text` itself for any other file. */
+  readonly originalText: string;
+  /**
+   * How `text` corresponds to `originalText`; undefined for a file no content mapper produced, and for the
+   * empty file that stands in for a transform that failed.
+   */
+  readonly spanMap: SpanMap | undefined;
+  /** The identity of the content mapper that produced this file. */
+  readonly contentMapper?: string | undefined;
+  /** The file name that decides the syntax and module format of the transformed text (`App.vue.ts`). */
+  readonly virtualFileName?: string | undefined;
+  /** The directives of the original text that apply to diagnostics of the transformed text. */
+  readonly diagnosticDirectives?: readonly MappedDiagnosticDirective[] | undefined;
+  /** The names the compiler gave the supplemental files a content mapper produced with this file. */
+  readonly supplementalSourceFileNames?: readonly string[] | undefined;
+  /** For a supplemental file, the name of the file it was produced with. */
+  readonly canonicalSourceFileName?: string | undefined;
   readonly fileName: string;
   /** The file's path: its absolute, normalized file name, lower-cased where file names are case-insensitive. */
   readonly path: string;

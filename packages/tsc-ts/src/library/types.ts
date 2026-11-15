@@ -14,6 +14,8 @@ import type {
   ObjectFlags,
   SignatureFlags,
   SignatureKind,
+  SpanMapFeature,
+  SpanMapKind,
   SymbolFlags,
   TypeFlags,
   TypeFormatFlags,
@@ -243,12 +245,22 @@ export interface TypePredicate {
 /**
  * A diagnostic, with its text and positions as TypeScript 7's API returns them. `fileName` is undefined
  * for global and program diagnostics.
+ *
+ * A diagnostic of a file a content mapper produced is located in the file's original text, where its range
+ * maps to it (`SourceFile.spanMap`); one of a supplemental file has the name of the file it was produced
+ * with. A diagnostic that lies entirely in text the mapper synthesized has no place in the original: its
+ * range is one of the file's text, and its `messageChain` ends with a message that says so (TS18074).
  */
 export interface Diagnostic {
   readonly fileName: string | undefined;
   readonly pos: number;
   readonly end: number;
   readonly code: number;
+  /**
+   * For a diagnostic a content mapper reported, the prefix shown before `code` in place of `TS`; undefined for
+   * a diagnostic of the compiler.
+   */
+  readonly source: string | undefined;
   readonly category: DiagnosticCategory;
   readonly text: string;
   readonly reportsUnnecessary: boolean;
@@ -273,6 +285,85 @@ export interface FileSystemEntries {
 }
 
 /**
+ * One mapping of a transformed text, as a content mapper sends it: `[virtualStart, virtualLength,
+ * originalStart, originalLength, kind]`, with the features that use it as an optional sixth element (every
+ * feature without it). Positions are UTF-16 offsets.
+ */
+export type ContentMapperMapping =
+  | readonly [number, number, number, number, SpanMapKind]
+  | readonly [number, number, number, number, SpanMapKind, SpanMapFeature];
+
+/**
+ * A diagnostic directive, as a content mapper sends it: `[originalStart, originalLength, virtualStart,
+ * virtualEnd, policy]`, with the index of its diagnostic in `unusedExpectDirectiveDiagnostics` as an optional
+ * sixth element, which a directive with the policy `Expect` needs unless there is exactly one.
+ */
+export type ContentMapperDiagnosticDirective =
+  | readonly [number, number, number, number, number]
+  | readonly [number, number, number, number, number, number];
+
+/** The diagnostic directives of a transformed text, and the diagnostics reported for those that suppress nothing. */
+export interface ContentMapperDiagnosticDirectives {
+  readonly unusedExpectDirectiveDiagnostics: readonly { readonly code: number; readonly messageText: string }[];
+  readonly directives: readonly ContentMapperDiagnosticDirective[];
+}
+
+/** A virtual file a content mapper returns: the text the compiler parses, and how it maps to the original text. */
+export interface ContentMapperOutput {
+  readonly text: string;
+  /** How `text` is parsed: `.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs` or `.json`. */
+  readonly extension: string;
+  /** Without mappings, or with none, the whole text is synthesized. */
+  readonly mappings?: readonly ContentMapperMapping[] | null | undefined;
+  readonly diagnosticDirectives?: ContentMapperDiagnosticDirectives | null | undefined;
+}
+
+/** An error a content mapper found in the original text, at UTF-16 offsets of it. */
+export interface ContentMapperDiagnostic {
+  readonly messageText: string;
+  readonly start: number;
+  readonly length: number;
+  readonly code: number;
+}
+
+/**
+ * What a content mapper answers for one file, as a mapper process answers a `transform` request of TypeScript
+ * 7's content mapper protocol: the file's virtual text, the errors of the original text, and the supplemental
+ * files the program gets with the file, each under a name the compiler gives it (`App.vue.0.ts`).
+ */
+export interface ContentMapperResult extends ContentMapperOutput {
+  readonly diagnostics?: readonly ContentMapperDiagnostic[] | null | undefined;
+  readonly supplemental?: readonly ContentMapperOutput[] | null | undefined;
+}
+
+/**
+ * A content mapper the host runs itself, in place of the process TypeScript 7 starts for a mapper that a config
+ * file's `contentMappers` name. tsc-ts/api only: TypeScript 7's API has no such member.
+ */
+export interface ContentMapper {
+  /**
+   * The mapper's name and version, as the `package.json` of a mapper's package has them. Diagnostics name the
+   * mapper by `name`, and `SourceFile.contentMapper` of the files it produces is `name@version`, or `name`
+   * without a version.
+   */
+  readonly name: string;
+  readonly version?: string | undefined;
+  /**
+   * The prefix of the codes of the mapper's diagnostics, shown in place of `TS`: not blank, not `typescript`
+   * or `tsc`, and not an extension the compiler reads.
+   */
+  readonly diagnosticSource: string;
+  /** The file extensions the mapper transforms (`.vue`), none of which the compiler reads itself. */
+  readonly extensions: readonly string[];
+  /**
+   * The transform of the file `fileName` with the text `text`. It must depend on nothing else: a program takes
+   * the result of an `oldProgram` for a file with the same text. Throwing fails the transform of the file, as
+   * a mapper process that answers the request with an error does.
+   */
+  transform(fileName: string, text: string): ContentMapperResult;
+}
+
+/**
  * Where a program reads files. Each callback may answer undefined to fall back to the real file system;
  * `readFile` answers null for a file that doesn't exist.
  */
@@ -286,6 +377,12 @@ export interface ProgramHost {
   useCaseSensitiveFileNames(): boolean;
   /** The directory with TypeScript 7's `lib.*.d.ts` files. */
   getDefaultLibraryDirectory(): string;
+  /**
+   * The content mappers the host runs. A program has the files with their extensions as the mappers transform
+   * them: as root files, as files a config file's `include` matches, and as modules that imports name with
+   * the extension. tsc-ts/api only; the mappers of a config file's `contentMappers` do not run.
+   */
+  readonly contentMappers?: readonly ContentMapper[] | undefined;
 }
 
 export interface CreateProgramOptions {
@@ -295,8 +392,10 @@ export interface CreateProgramOptions {
   /**
    * A program created by tsc-ts/api whose parsed files the new program takes instead of parsing them again, where a
    * file has the same name, module detection options and text, as TypeScript 5's `oldProgram` with a host that keeps
-   * unchanged files. The new program resolves its modules and checks anew, and the old one stays usable. A disposed
-   * old program throws a DisposedProgramError.
+   * unchanged files. A file a content mapper of the host produced is taken, with its supplemental files, where the
+   * file has the same text and the mapper the same name, version and diagnostic source, without transforming it
+   * again. The new program resolves its modules and checks anew, and the old one stays usable. A disposed old
+   * program throws a DisposedProgramError.
    */
   readonly oldProgram?: Program | undefined;
 }
@@ -332,6 +431,9 @@ export interface Program {
    * instead: the file is not in the program, is a package.json, belongs to a package installed more than once, or no
    * longer imports, references or needs the same modules. This program stays as it was, and each of the two is
    * disposed of on its own.
+   *
+   * A file a content mapper of the host produced is transformed again from `text`, its original text. Undefined
+   * also when the transform fails, or returns other supplemental files than the program has for the file.
    */
   updateFile(fileName: string, text: string): Program | undefined;
   /** Frees the program's checkers. The program and its objects must not be used after. */

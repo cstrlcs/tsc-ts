@@ -99,12 +99,11 @@ import {
 import { ContentMapperProcessHost, type ProcessSpawner } from '../compiler/content-mapper-process-host.js';
 import { decodeNodes } from '../compiler/decoder.js';
 import {
-  createCompilerDiagnostic,
   type Diagnostic as CompilerDiagnostic,
   type DiagnosticFile,
-  Diagnostics,
   Locale,
   resolveDiagnosticLocation,
+  synthesizedTextNote,
 } from '../compiler/diagnostics.js';
 import { encodeNode, encodeSourceFile as encodeFile, NodeIndexTable } from '../compiler/encoder.js';
 import {
@@ -127,7 +126,6 @@ import { EmitContext } from '../compiler/printer/emit-context.js';
 import { Printer, PrinterOptions } from '../compiler/printer/printer.js';
 import { Program } from '../compiler/program.js';
 import { CheckedProgram } from '../compiler/program-checker.js';
-import { SpanMapFidelity } from '../compiler/span-map.js';
 import { type ApiCompilerOptions as CompilerOptions, compilerOptionsOf } from '../library/options.js';
 export type { ApiCompilerOptions as CompilerOptions } from '../library/options.js';
 import { checkedFileDiagnostics, type DiagnosticKind, programDiagnostics } from '../library/diagnostics.js';
@@ -397,7 +395,10 @@ export class Project {
   // content mapped file, as tsgo's project service does; mappers that cannot say watch none.
   private watchedPathsOfMappers(): string[] {
     const program = this.program;
-    if (this.contentMappers === undefined || !program.getSourceFiles().some((file) => file.contentMapper() !== ''))
+    if (
+      this.contentMappers === undefined ||
+      !program.getSourceFiles().some((file) => file.contentMapperIdentity() !== '')
+    )
       return [];
     const watched = this.contentMappers.watchedFiles();
     return Array.isArray(watched) ? watched.map((fileName) => program.toPath(fileName)) : [];
@@ -1847,6 +1848,10 @@ function apiDiagnosticOf(d: CompilerDiagnostic): Diagnostic {
     endPosition = { line: endLine, character: end - lineStarts[endLine] };
     sourceLines = diagnosticSourceLines(file.text, lineStarts, startLine, endLine);
   }
+  // A compiler diagnostic that lies entirely in text a content mapper synthesized has no place in the original
+  // text and is shown where it is in the file's text: its chain ends with a note that says so and names the mapper,
+  // as the last line of the diagnostic on the command line does.
+  const note = synthesizedTextNote(d);
   return {
     fileName: file?.fileName,
     pos,
@@ -1860,24 +1865,9 @@ function apiDiagnosticOf(d: CompilerDiagnostic): Diagnostic {
     text: d.localize(Locale.Default),
     reportsUnnecessary: d.reportsUnnecessary,
     reportsDeprecated: d.reportsDeprecated,
-    messageChain: [...d.messageChain, ...synthesizedTextNote(d)].map(apiDiagnosticOf),
+    messageChain: (note === undefined ? d.messageChain : [...d.messageChain, note]).map(apiDiagnosticOf),
     relatedInformation: d.relatedInformation.map(apiDiagnosticOf),
   };
-}
-
-// A compiler diagnostic that lies entirely in text a content mapper synthesized has no place in the original
-// text and is shown where it is in the file's text: its chain ends with a note that says so and names the mapper,
-// as the last line of the diagnostic on the command line does.
-function synthesizedTextNote(d: CompilerDiagnostic): CompilerDiagnostic[] {
-  const mapped = d.file?.mapped;
-  if (mapped === undefined || mapped.spanMap === undefined || d.source !== '') return [];
-  if (mapped.spanMap.virtualToOriginalSpan(d.pos, d.end).fidelity !== SpanMapFidelity.None) return [];
-  return [
-    createCompilerDiagnostic(
-      Diagnostics.This_location_is_in_virtual_code_produced_by_the_content_mapper_0_and_has_no_corresponding_location_in_the_original_file,
-      mapped.contentMapper,
-    ),
-  ];
 }
 
 /** The line of `position`: the last line starting at or before it. */

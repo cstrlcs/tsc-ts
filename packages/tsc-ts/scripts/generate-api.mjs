@@ -64,6 +64,10 @@ const enumFiles = [
   'newLineKind',
   'diagnosticCategory',
   'internalSymbolName',
+  'spanMapKind',
+  'spanMapFeature',
+  'spanMapFidelity',
+  'diagnosticDirectivePolicy',
 ];
 
 function generateEnums() {

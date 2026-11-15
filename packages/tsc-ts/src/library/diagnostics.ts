@@ -1,7 +1,12 @@
 // The diagnostics of programs, as tsc-ts's public API and `tsc-ts --api` return them.
 
 import type { SourceFile } from '../compiler/ast.js';
-import { type Diagnostic as CompilerDiagnostic, Locale } from '../compiler/diagnostics.js';
+import {
+  type Diagnostic as CompilerDiagnostic,
+  Locale,
+  resolveDiagnosticLocation,
+  synthesizedTextNote,
+} from '../compiler/diagnostics.js';
 import { sortAndDeduplicateDiagnostics } from '../compiler/program.js';
 import type { CheckedProgram } from '../compiler/program-checker.js';
 import type { DiagnosticCategory } from './enums.generated.js';
@@ -17,18 +22,29 @@ export type DiagnosticKind =
   | 'suggestion'
   | 'declaration';
 
-/** A diagnostic as plain data, with its text in the default locale and its chain and related information. */
+/**
+ * A diagnostic as plain data, with its text in the default locale and its chain and related information. One
+ * of a file a content mapper produced is where tsgo's API shows it (`resolveDiagnosticLocation`): in the
+ * original text where its range maps to it, and under the name of the canonical file for a supplemental one.
+ * One that lies entirely in text the mapper synthesized stays where it is, and its chain ends with a message
+ * that says so.
+ */
 export function diagnosticOf(d: CompilerDiagnostic): Diagnostic {
+  const location = resolveDiagnosticLocation(d);
+  const messageChain = d.messageChain.map(diagnosticOf);
+  const note = synthesizedTextNote(d);
+  if (note !== undefined) messageChain.push(diagnosticOf(note));
   return {
-    fileName: d.file?.fileName,
-    pos: d.pos,
-    end: d.end,
+    fileName: location === undefined ? d.file?.fileName : location.file.fileName,
+    pos: location === undefined ? d.pos : location.pos,
+    end: location === undefined ? d.end : location.end,
     code: d.code,
+    source: d.source === '' ? undefined : d.source,
     category: d.category as number as DiagnosticCategory,
     text: d.localize(Locale.Default),
     reportsUnnecessary: d.reportsUnnecessary,
     reportsDeprecated: d.reportsDeprecated,
-    messageChain: d.messageChain.map(diagnosticOf),
+    messageChain,
     relatedInformation: d.relatedInformation.map(diagnosticOf),
   };
 }

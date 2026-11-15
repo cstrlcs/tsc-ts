@@ -12,6 +12,8 @@ import type { ResolutionMode } from './module-resolution-types.js';
 import type { SpanMap } from './span-map.js';
 import type { FlowNode } from './flow.js';
 import type { Symbol, SymbolTable } from './symbol.js';
+import type { MappedDiagnosticDirective as PublicMappedDiagnosticDirective } from '../library/ast.js';
+import type { SpanMap as PublicSpanMap } from '../library/span-map.js';
 
 /** The id of the most recently constructed node. */
 let lastNodeId = 0;
@@ -8318,6 +8320,15 @@ export class SourceFile extends Node {
   jsDocs: Map<number, Node[]> | undefined;
   /** For a file a content mapper produced, what it keeps of the transform (`setContentMapperInfo`). */
   contentMapperInfo: ContentMapperSourceFileInfo | undefined;
+  // The members of TypeScript 7's API that are objects of that API. tsc-ts/api sets them on the files of its
+  // programs that a content mapper produced (library/host.ts); the compiler reads `contentMapperSpanMap`,
+  // `contentMapperDiagnosticDirectives` and `supplementalSourceFiles` instead.
+  /** TypeScript 7's API `spanMap`: the map from the file's text back to its original text. */
+  spanMap: PublicSpanMap | undefined;
+  /** TypeScript 7's API `diagnosticDirectives`: the directives of the original file, where there are any. */
+  diagnosticDirectives: readonly PublicMappedDiagnosticDirective[] | undefined;
+  /** TypeScript 7's API `supplementalSourceFileNames`: the names of the file's supplemental virtual files. */
+  supplementalSourceFileNames: readonly string[] | undefined;
   private diagnosticFileCache: DiagnosticFile | undefined;
 
   // Set by the binder.
@@ -8385,6 +8396,9 @@ export class SourceFile extends Node {
     this.hasLazyJSDoc = false;
     this.jsDocs = undefined;
     this.contentMapperInfo = undefined;
+    this.spanMap = undefined;
+    this.diagnosticDirectives = undefined;
+    this.supplementalSourceFileNames = undefined;
     this.diagnosticFileCache = undefined;
     this.symbol = undefined;
     this.locals = undefined;
@@ -8457,8 +8471,11 @@ export class SourceFile extends Node {
     );
   }
 
-  /** The text a content mapper transformed into this file's, or the file's own text. */
-  originalText(): string {
+  /**
+   * The text a content mapper transformed into this file's, or the file's own text: TypeScript 7's API
+   * `originalText`.
+   */
+  get originalText(): string {
     const info = this.contentMapperInfo;
     return info !== undefined && info.contentMapper !== '' ? info.originalText : this.text;
   }
@@ -8473,18 +8490,24 @@ export class SourceFile extends Node {
    * The map from the file's text back to its original text; `undefined` for a file no content mapper
    * produced and for the empty file that stands in for a transform that failed.
    */
-  spanMap(): SpanMap | undefined {
+  contentMapperSpanMap(): SpanMap | undefined {
     return this.contentMapperInfo === undefined ? undefined : this.contentMapperInfo.spanMap;
   }
 
   /** The identity of the content mapper that produced the file, or `''`. */
-  contentMapper(): string {
+  contentMapperIdentity(): string {
     return this.contentMapperInfo === undefined ? '' : this.contentMapperInfo.contentMapper;
+  }
+
+  /** The identity of the content mapper that produced the file: TypeScript 7's API `contentMapper`. */
+  get contentMapper(): string | undefined {
+    const identity = this.contentMapperIdentity();
+    return identity === '' ? undefined : identity;
   }
 
   /** Whether this is the empty file that stands in for a transform that failed. */
   isContentMapperFailureStub(): boolean {
-    return this.contentMapper() !== '' && this.spanMap() === undefined;
+    return this.contentMapperIdentity() !== '' && this.contentMapperSpanMap() === undefined;
   }
 
   /** The identity of the transform that produced the file, or `''`. */
@@ -8493,12 +8516,21 @@ export class SourceFile extends Node {
   }
 
   /** The file's name with its virtual extension, or `''` for a file no content mapper produced. */
-  virtualFileName(): string {
+  contentMapperVirtualFileName(): string {
     return this.contentMapperInfo === undefined ? '' : this.contentMapperInfo.virtualFileName;
   }
 
+  /**
+   * The file's name with its virtual extension, which decides its script kind and module format: TypeScript
+   * 7's API `virtualFileName`.
+   */
+  get virtualFileName(): string | undefined {
+    const name = this.contentMapperVirtualFileName();
+    return name === '' ? undefined : name;
+  }
+
   /** The directives of the original file that govern diagnostics in ranges of this file's text. */
-  diagnosticDirectives(): readonly MappedDiagnosticDirective[] {
+  contentMapperDiagnosticDirectives(): readonly MappedDiagnosticDirective[] {
     return this.contentMapperInfo === undefined
       ? emptyDiagnosticDirectives
       : this.contentMapperInfo.diagnosticDirectives;
@@ -8512,6 +8544,12 @@ export class SourceFile extends Node {
   /** The canonical file of a supplemental virtual file. */
   canonicalSourceFile(): SourceFile | undefined {
     return this.contentMapperInfo === undefined ? undefined : this.contentMapperInfo.canonicalSourceFile;
+  }
+
+  /** The name of the canonical file of a supplemental virtual file: TypeScript 7's API `canonicalSourceFileName`. */
+  get canonicalSourceFileName(): string | undefined {
+    const canonical = this.canonicalSourceFile();
+    return canonical === undefined ? undefined : canonical.fileName;
   }
 }
 

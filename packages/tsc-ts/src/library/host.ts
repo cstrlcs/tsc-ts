@@ -2,11 +2,14 @@
 
 import { diskEntries, diskReadFile, diskRealpath, diskStat } from './disk.js';
 import { ParseOptions, ScriptKind, type ExternalModuleIndicatorOptions, type SourceFile } from '../compiler/ast.js';
-import { CompilerHost } from '../compiler/file-loader.js';
+import type { ContentMapper, ContentMapperProject } from '../compiler/content-mapper.js';
+import { CompilerHost, ContentMappedSourceFiles, type ContentMapperFailure } from '../compiler/file-loader.js';
 import { DirectoryEntries, FileSystem } from '../compiler/file-system.js';
 import { takePreparedFile } from '../compiler/parallel-parse.js';
 import { parseSourceFile } from '../compiler/parser.js';
 import type { Program as CompilerProgram } from '../compiler/program.js';
+import type { DiagnosticDirectivePolicy } from './enums.generated.js';
+import { SpanMap, type SpanMapSegment } from './span-map.js';
 import type { ProgramHost } from './types.js';
 
 /**
@@ -92,6 +95,10 @@ export class ReplacedFileSystem extends FileSystem {
  * taken only when the host gives the same text for it; the program parses the host's text otherwise. With an old
  * program, the parsed and bound file of that program is taken when the file has the same name, path, module
  * detection options and text, for which it parses the same, until `releaseOldProgram`.
+ *
+ * The files a content mapper produces get the members of the API's SourceFile that are objects of the API
+ * (`setMappedFileMembers`). With an old program, the file of that program and its supplemental files are taken
+ * when the mapper, as the project configures it, produced them from the same text.
  */
 export class LibraryCompilerHost extends CompilerHost {
   constructor(
@@ -100,8 +107,9 @@ export class LibraryCompilerHost extends CompilerHost {
     defaultLibraryPath: string,
     /** The program whose files this host takes where they are unchanged. */
     private oldProgram: CompilerProgram | undefined = undefined,
+    contentMapperProject: ContentMapperProject | undefined = undefined,
   ) {
-    super(fs, currentDirectory, defaultLibraryPath);
+    super(fs, currentDirectory, defaultLibraryPath, contentMapperProject);
   }
 
   getSourceFile(
@@ -126,8 +134,60 @@ export class LibraryCompilerHost extends CompilerHost {
     );
   }
 
+  getContentMappedSourceFiles(
+    fileName: string,
+    path: string,
+    externalModuleIndicatorOptions: ExternalModuleIndicatorOptions,
+    mapper: ContentMapper,
+  ): ContentMappedSourceFiles | ContentMapperFailure | undefined {
+    const old = this.oldProgram?.getSourceFileByPath(path);
+    // A file parsed with other options than these, as one whose virtual extension makes it a module is, is
+    // transformed again, and so is one with a supplemental file whose name is now that of a file on disk, which
+    // the transform reports.
+    const parsedAlike = (file: SourceFile): boolean =>
+      file.externalModuleIndicatorOptions.jsx === externalModuleIndicatorOptions.jsx &&
+      file.externalModuleIndicatorOptions.force === externalModuleIndicatorOptions.force;
+    if (
+      old !== undefined &&
+      old.fileName === fileName &&
+      old.contentMapperSpanMap() !== undefined &&
+      old.contentMapperIdentity() === mapper.identity() &&
+      old.contentMapperTransformIdentity() === this.contentMapperProject?.identity(mapper) &&
+      parsedAlike(old) &&
+      old.supplementalSourceFiles().every((file) => parsedAlike(file) && !this.fileExists(file.fileName)) &&
+      old.originalText === this.readFile(fileName)
+    )
+      return new ContentMappedSourceFiles(old, old.supplementalSourceFiles());
+    const files = super.getContentMappedSourceFiles(fileName, path, externalModuleIndicatorOptions, mapper);
+    if (files instanceof ContentMappedSourceFiles) {
+      setMappedFileMembers(files.canonical);
+      for (const file of files.supplemental) setMappedFileMembers(file);
+    }
+    return files;
+  }
+
   /** Stops taking files from the old program, once the new program has loaded, so that it doesn't keep the old one. */
   releaseOldProgram(): void {
     this.oldProgram = undefined;
   }
+}
+
+/**
+ * Sets the members of the API's SourceFile that are objects of the API on a file a content mapper produced:
+ * its span map, its diagnostic directives and the names of its supplemental files, each undefined where the
+ * file has none, as TypeScript 7's API gives them.
+ */
+function setMappedFileMembers(file: SourceFile): void {
+  const spanMap = file.contentMapperSpanMap();
+  if (spanMap !== undefined) file.spanMap = new SpanMap(spanMap.segments as unknown as readonly SpanMapSegment[]);
+  const directives = file.contentMapperDiagnosticDirectives();
+  if (directives.length > 0)
+    file.diagnosticDirectives = directives.map((directive) => ({
+      originalRange: { pos: directive.originalPos, end: directive.originalEnd },
+      virtualRange: { pos: directive.virtualPos, end: directive.virtualEnd },
+      policy: directive.policy as number as DiagnosticDirectivePolicy,
+      unusedCode: directive.unusedCode,
+    }));
+  const supplemental = file.supplementalSourceFiles();
+  if (supplemental.length > 0) file.supplementalSourceFileNames = supplemental.map((other) => other.fileName);
 }

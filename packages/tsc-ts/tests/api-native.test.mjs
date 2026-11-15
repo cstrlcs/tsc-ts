@@ -1,6 +1,7 @@
 // tsc-ts/api compiled with scriptc: tests/native/api-probe.ts, built natively with the installed scriptc and with
 // tsc for Node, prints the same answers for the library fixture projects (files, diagnostics, and the symbols, types,
-// signatures and text at every node). api-library.test.mjs compares the Node build's answers with tsc --api's.
+// signatures and text at every node), and for the files that content mappers of its host produce. api-library.test.mjs
+// compares the Node build's answers with tsc --api's.
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { closeSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, symlinkSync } from 'node:fs';
@@ -50,13 +51,15 @@ test('a native build of tsc-ts/api answers as the Node build', { skip, timeout: 
   );
 
   // The library fixture (more than 4,000 answers), one whose files and config file have errors, one without
-  // strictNullChecks, where types widen, and a project that loads the sources of the projects it references, one of
-  // them a package linked into its node_modules.
+  // strictNullChecks, where types widen, a project that loads the sources of the projects it references, one of
+  // them a package linked into its node_modules, and one with files that the content mappers of the probe's host
+  // transform.
   for (const [fixture, minimum, configName] of [
     ['library', 4000, 'tsconfig.json'],
     ['library-errors', 50, 'tsconfig.json'],
     ['library-loose', 100, 'tsconfig.json'],
     ['referenced-projects', 300, 'app/tsconfig.json'],
+    ['library-mapped', 600, 'tsconfig.base.json'],
   ]) {
     const dir = tempDir('tsc-ts-api-native-');
     cpSync(join(root, 'tests/fixtures', fixture), dir, { recursive: true });

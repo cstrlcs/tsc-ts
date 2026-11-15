@@ -8,6 +8,8 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 import { Client } from './client.mjs';
+import { mapperNames, writeMapperLaunchers } from './content-mapper-server.mjs';
+import { hostMapper, libraryFileMembers, linkMapperPackages, mappedFileMembers } from './library-mappers.mjs';
 import { tempDir } from './temp.mjs';
 import { typescriptLib as bundledLib } from './toolchain.mjs';
 
@@ -252,6 +254,213 @@ test('a program loads the sources of referenced projects, as tsc --api does', { 
   } finally {
     await tsgo.close();
   }
+});
+
+test('the mapped files of a program are those of tsc --api', { skip, timeout: 300_000 }, async () => {
+  const api = await load('library/index.js');
+  const spanMap = await load('compiler/span-map.js');
+  const { NodeIndexTable } = await load('compiler/encoder.js');
+  const dir = realpathSync(tempDir('tsc-ts-library-mapped-'));
+  cpSync(join(root, 'tests/fixtures/library-mapped'), dir, { recursive: true });
+  linkMapperPackages(dir, ['box-mapper', 'vue-mapper']);
+  // TypeScript runs the mappers that the config file names as processes, which it finds on PATH. The library
+  // runs the same mappers as the callbacks of its host, for the config without `contentMappers` that the
+  // config file extends.
+  const launchers = writeMapperLaunchers(tempDir('tsc-ts-library-mappers-'), join(dist, 'compiler/span-map.js'));
+  assert.ok(mapperNames.includes('compiler-test-mapper'));
+  const tsgo = new Client(
+    [realTsc],
+    dir,
+    { PATH: `${launchers}:${process.env.PATH}` },
+    { args: ['--runExternalCode'] },
+  );
+  const program = api.createProgramFromConfigFile(join(dir, 'tsconfig.base.json'), {
+    ...hostFor(dir),
+    contentMappers: [
+      hostMapper(spanMap, 'compiler-test-mapper', 'box-mapper', 'box', ['.box'], { strict: true }),
+      hostMapper(spanMap, 'supplemental-diagnostics-mapper', 'vue-mapper', 'mapper', ['.vue']),
+    ],
+  });
+  try {
+    await tsgo.json('initialize');
+    const update = await tsgo.snapshot({ openProjects: [join(dir, 'tsconfig.json')] });
+    const base = { snapshot: update.snapshot, project: update.projects[0].id };
+    const names = program.getSourceFileNames();
+    assert.deepEqual(names, await tsgo.json('getSourceFileNames', base));
+    const own = names.filter((name) => name.startsWith(dir));
+    assert.deepEqual(
+      own.map((name) => name.slice(dir.length)),
+      ['/src/app.box', '/src/widget.vue.0.ts', '/src/widget.vue', '/src/main.ts'],
+    );
+
+    // The members of each file, as TypeScript's client reads them from the encoded file.
+    for (const fileName of own) {
+      const reply = await tsgo.request('getSourceFile', { ...base, file: fileName });
+      assert.equal(reply.type, 'response', fileName);
+      assert.deepEqual(
+        JSON.parse(JSON.stringify(libraryFileMembers(program.getSourceFile(fileName)))),
+        JSON.parse(JSON.stringify(mappedFileMembers(reply.payload))),
+        fileName,
+      );
+    }
+    const box = program.getSourceFile(join(dir, 'src/app.box'));
+    assert.equal(box.contentMapper, 'box-mapper@1.0.0');
+    assert.equal(box.virtualFileName, join(dir, 'src/app.box.ts'));
+    assert.equal(box.originalText, readFileSync(join(dir, 'src/app.box'), 'utf8'));
+    assert.notEqual(box.text, box.originalText);
+    assert.equal(box.diagnosticDirectives.length, 3);
+    assert.ok(box.spanMap instanceof api.SpanMap);
+    assert.equal(box.spanMap, box.spanMap);
+    const vue = program.getSourceFile(join(dir, 'src/widget.vue'));
+    assert.deepEqual(vue.supplementalSourceFileNames, [join(dir, 'src/widget.vue.0.ts')]);
+    assert.deepEqual(vue.spanMap.segments, []);
+    const supplemental = program.getSourceFile(join(dir, 'src/widget.vue.0.ts'));
+    assert.equal(supplemental.canonicalSourceFileName, vue.fileName);
+    assert.equal(supplemental.contentMapper, 'vue-mapper@1.0.0');
+    // A file no content mapper produced has its text as its original text and none of the other members.
+    const main = program.getSourceFile(join(dir, 'src/main.ts'));
+    assert.deepEqual(libraryFileMembers(main), { ...libraryFileMembers(main), originalText: main.text });
+    for (const member of ['spanMap', 'contentMapper', 'virtualFileName', 'diagnosticDirectives'])
+      assert.equal(main[member], undefined, member);
+
+    // Diagnostics are where TypeScript shows them: in the original text where their range maps to it, under
+    // the name of the canonical file for a supplemental one, and with the mapper's source for its own.
+    for (const kind of ['ConfigFileParsing', 'Program', 'Global'])
+      assert.deepEqual(
+        wire(program[`get${kind}Diagnostics`]()),
+        withoutPositions(await tsgo.json(`get${kind}Diagnostics`, base)),
+        kind,
+      );
+    for (const kind of ['Syntactic', 'Bind', 'Semantic', 'Suggestion', 'Declaration']) {
+      assert.deepEqual(
+        wire(program[`get${kind}Diagnostics`]()),
+        withoutPositions(await tsgo.json(`get${kind}Diagnostics`, base)),
+        kind,
+      );
+      for (const fileName of own)
+        assert.deepEqual(
+          wire(program[`get${kind}Diagnostics`](program.getSourceFile(fileName))),
+          withoutPositions(await tsgo.json(`get${kind}Diagnostics`, { ...base, files: [fileName] })),
+          `${kind} ${fileName}`,
+        );
+    }
+    // The text a diagnostic's range is in: the original text of its file, or for one in synthesized text the
+    // text of the file it was found in, here the supplemental file.
+    const shown = (d) =>
+      (d.messageChain.some((entry) => entry.code === 18074)
+        ? supplemental.text
+        : program.getSourceFile(d.fileName).originalText
+      ).slice(d.pos, d.end);
+    assert.deepEqual(
+      program
+        .getSemanticDiagnostics()
+        .map((d) => [d.fileName.slice(dir.length), `${d.source ?? 'TS'}${d.code}`, shown(d)]),
+      [
+        // An `Expect` directive that suppressed nothing, at the directive in the original text.
+        ['/src/app.box', 'box2578', '// @box-expect-error: Unused box directive.'],
+        ['/src/app.box', 'TS2322', 'mismatch'],
+        ['/src/app.box', 'TS2322', 'version'],
+        ['/src/main.ts', 'TS2322', 'wrong'],
+        // In text the mapper synthesized, which has no place in the original: where it is in the supplemental
+        // file's text, under the name of the canonical file, with a note that says so.
+        ['/src/widget.vue', 'TS2304', 'missingSupplementalGlobal'],
+        ['/src/widget.vue', 'TS2322', 'count'],
+      ],
+    );
+    const original = box.originalText;
+    assert.deepEqual(
+      program.getSyntacticDiagnostics(box).map((d) => [d.source, d.code, original.slice(d.pos, d.end)]),
+      [['box', 1000, '#{unclosed']],
+    );
+    assert.deepEqual(wire(api.getPreEmitDiagnostics(program)).length, 7);
+
+    // The symbol and the type at every identifier of the project's files.
+    const checker = program.getTypeChecker();
+    const tables = new Map();
+    let identifiers = 0;
+    for (const fileName of own) {
+      const file = program.getSourceFile(fileName);
+      const nodes = [];
+      api.walkPreorder(file, (node) => {
+        if (node.kind === SyntaxKind.Identifier) nodes.push(node);
+      });
+      for (const node of nodes) {
+        if (!tables.has(file)) tables.set(file, new NodeIndexTable(file));
+        const location = `${tables.get(file).indexOf(node)}.${node.kind}.${file.path}`;
+        const what = `${fileName} ${node.pos} ${api.getTextOfNode(node)}`;
+        const symbol = checker.getSymbolAtLocation(node);
+        const refSymbol = await tsgo.json('getSymbolAtLocation', { ...base, location });
+        // tsgo's API names a symbol by its escaped name.
+        assert.equal(
+          symbol === undefined ? null : symbol.escapedName,
+          refSymbol === null ? null : refSymbol.name,
+          what,
+        );
+        const refType = await tsgo.json('getTypeAtLocation', { ...base, location });
+        assert.equal(
+          checker.typeToString(checker.getTypeAtLocation(node)),
+          await tsgo.json('typeToString', { ...base, type: refType.id }),
+          what,
+        );
+        identifiers++;
+      }
+    }
+    assert.ok(identifiers > 20, `${identifiers} identifiers`);
+  } finally {
+    program.dispose();
+    await tsgo.close();
+  }
+});
+
+test('SpanMap answers as the class of TypeScript 7', { skip }, async () => {
+  const api = await load('library/index.js');
+  // The answers of TypeScript 7's `SpanMap` (packages/typescript/src/ast/spanMap.ts at the pinned commit, which
+  // the upstream checkout does not include) for a map given out of order, with a verbatim segment, an atom, an
+  // alias that only signature help uses, and two copies of one original range: `[method, arguments, result]`,
+  // with a range result as `[pos, end, fidelity]` and a position result as `[position, fidelity]`.
+  const recorded = JSON.parse(readFileSync(join(root, 'tests/fixtures/span-map/typescript-7.json'), 'utf8'));
+  const map = new api.SpanMap(recorded.segments);
+  assert.deepEqual(
+    map.segments.map((segment) => segment.virtualStart),
+    [4, 12, 21, 30, 40],
+  );
+  assert.deepEqual(
+    map.segments.map((segment) => segment.features),
+    [
+      api.SpanMapFeature.All,
+      api.SpanMapFeature.All,
+      api.SpanMapFeature.SignatureHelp,
+      api.SpanMapFeature.All,
+      api.SpanMapFeature.All,
+    ],
+  );
+  const short = (answer) =>
+    Array.isArray(answer)
+      ? answer.map(short)
+      : answer.range !== undefined
+        ? [answer.range.pos, answer.range.end, answer.fidelity]
+        : [answer.position, answer.fidelity];
+  assert.ok(recorded.answers.length >= 80);
+  for (const [method, args, expected] of recorded.answers)
+    assert.deepEqual(short(map[method](...args)), expected, `${method} ${JSON.stringify(args)}`);
+  assert.deepEqual(
+    [
+      api.SpanMapFidelity.Exact,
+      api.SpanMapFidelity.Atom,
+      api.SpanMapFidelity.Approximate,
+      api.SpanMapFidelity.None,
+    ].map((fidelity) => [
+      api.SpanMap.isExact(fidelity),
+      api.SpanMap.isSingleSegment(fidelity),
+      api.SpanMap.isNone(fidelity),
+    ]),
+    [
+      [true, true, false],
+      [false, true, false],
+      [false, false, false],
+      [false, false, true],
+    ],
+  );
 });
 
 test('symbols, types and signatures answer as tsc --api', { skip, timeout: 600_000 }, async () => {

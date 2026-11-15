@@ -112,8 +112,10 @@ function describe(program) {
   const lines = [program.explainFiles(defaultLocale)];
   for (const file of program.getSourceFiles()) {
     if (file.fileName.includes('/libs/')) continue;
-    lines.push(`file ${file.fileName} ${file.virtualFileName()} ${file.contentMapper()} ${JSON.stringify(file.text)}`);
-    lines.push(`  original ${JSON.stringify(file.originalText())} of ${file.originalFileName()}`);
+    lines.push(
+      `file ${file.fileName} ${file.contentMapperVirtualFileName()} ${file.contentMapperIdentity()} ${JSON.stringify(file.text)}`,
+    );
+    lines.push(`  original ${JSON.stringify(file.originalText)} of ${file.originalFileName()}`);
     for (const supplemental of file.supplementalSourceFiles()) lines.push(`  supplemental ${supplemental.fileName}`);
   }
   for (const d of program.getSyntacticDiagnostics()) lines.push('syntactic ' + diagnostic(d));

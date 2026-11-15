@@ -1,10 +1,18 @@
 // Prints tsc-ts/api's answers for a project, one line each: its files and diagnostics, the symbol, types,
 // signatures and children at every node of its files outside the default libraries, the tokens and comments of
 // their texts, and the answers of the program with its last file updated and of a program that takes its files.
-// The same answers are expected from a Node build and a native build of this file.
+// Its host runs two content mappers, for `.box` and `.vue` files: the members and span maps of the files they
+// produce are printed too, and what a mapped file's update, a mapper that throws and a result that is not valid
+// give. The same answers are expected from a Node build and a native build of this file.
 // Usage: api-probe <tsconfig.json> <default library directory>
 import {
   type CommentRange,
+  type ContentMapper,
+  type ContentMapperDiagnostic,
+  type ContentMapperDiagnosticDirective,
+  type ContentMapperMapping,
+  type ContentMapperResult,
+  createProgram,
   createProgramFromConfigFile,
   createScanner,
   type Diagnostic,
@@ -38,12 +46,16 @@ import {
   type Node,
   parseSourceFile,
   type Program,
+  type ProgramHost,
   type Scanner,
   type Signature,
   type StringLiteralLike,
   SignatureKind,
   skipTrivia,
   type SourceFile,
+  SpanMap,
+  SpanMapFeature,
+  SpanMapKind,
   type Statement,
   type Symbol,
   SymbolFlags,
@@ -91,7 +103,8 @@ function symbolText(symbol: Symbol | undefined): string {
 
 function diagnosticText(d: Diagnostic): string {
   const file = d.fileName === undefined ? '-' : d.fileName.substring(d.fileName.lastIndexOf('/') + 1);
-  return `${file}:${d.pos}-${d.end} TS${d.code} ${d.category} ${d.text}`;
+  const chain = d.messageChain.map((entry) => ` | ${entry.code} ${entry.text}`).join('');
+  return `${file}:${d.pos}-${d.end} ${d.source ?? 'TS'}${d.code} ${d.category} ${d.text}${chain}`;
 }
 
 function probe(program: Program, checker: TypeChecker): void {
@@ -342,20 +355,228 @@ function signatureText(checker: TypeChecker, signature: Signature): string {
   return `${signature.flags} ${nodeText(signature.declaration)} (${parameters}) [${parameterTypes.join('; ')}] ${returnType}`;
 }
 
+const boxPreamble = 'const __VERSION = "1.0.0";\n';
+
+/**
+ * The mapper of `.box` files: it writes a preamble, copies the text, and replaces each `#{name}` by `undefined`,
+ * where one that does not close on its line is an error of the file. A `// @box-ignore` or `// @box-expect-error:`
+ * line is a diagnostic directive for the line after it, and a `// @box-fail` line fails the transform.
+ */
+function transformBox(_fileName: string, text: string): ContentMapperResult {
+  if (text.includes('// @box-fail')) throw new Error('the box mapper failed');
+  let virtual = boxPreamble;
+  const mappings: ContentMapperMapping[] = [];
+  const diagnostics: ContentMapperDiagnostic[] = [];
+  const write = (piece: string, from: number, to: number, kind: SpanMapKind): void => {
+    if (kind === SpanMapKind.Verbatim && from === to) return;
+    mappings.push([virtual.length, piece.length, from, to - from, kind]);
+    virtual += piece;
+  };
+  let pos = 0;
+  while (pos < text.length) {
+    const start = text.indexOf('#{', pos);
+    if (start < 0) {
+      write(text.substring(pos), pos, text.length, SpanMapKind.Verbatim);
+      break;
+    }
+    const newLine = text.indexOf('\n', start);
+    const lineEnd = newLine < 0 ? text.length : newLine;
+    const close = text.indexOf('}', start);
+    const closed = close >= 0 && close < lineEnd;
+    const end = closed ? close + 1 : lineEnd;
+    write(text.substring(pos, start), pos, start, SpanMapKind.Verbatim);
+    write('undefined', start, end, SpanMapKind.Atom);
+    if (!closed)
+      diagnostics.push({ messageText: 'Unclosed interpolation.', start, length: lineEnd - start, code: 1000 });
+    pos = end;
+  }
+  // The virtual range of the line after a directive, through the span map of what was written.
+  const spanMap = new SpanMap(
+    mappings.map((mapping) => ({
+      virtualStart: mapping[0],
+      virtualEnd: mapping[0] + mapping[1],
+      originalStart: mapping[2],
+      originalEnd: mapping[2] + mapping[3],
+      kind: mapping[4],
+    })),
+  );
+  const directives: ContentMapperDiagnosticDirective[] = [];
+  const unused: { code: number; messageText: string }[] = [];
+  let lineStart = 0;
+  while (lineStart < text.length) {
+    const newLine = text.indexOf('\n', lineStart);
+    if (newLine < 0) break;
+    const line = text.substring(lineStart, newLine).trim();
+    const expect = line.startsWith('// @box-expect-error:');
+    if (line === '// @box-ignore' || expect) {
+      const nextNewLine = text.indexOf('\n', newLine + 1);
+      const spans = spanMap.originalToVirtualSpans(
+        { pos: newLine + 1, end: nextNewLine < 0 ? text.length : nextNewLine },
+        SpanMapFeature.All,
+      );
+      if (expect) unused.push({ code: 2578, messageText: line.substring('// @box-expect-error:'.length).trim() });
+      if (spans.length === 1) {
+        const range = spans[0]!.range;
+        if (expect) directives.push([lineStart, newLine - lineStart, range.pos, range.end, 1, unused.length - 1]);
+        else directives.push([lineStart, newLine - lineStart, range.pos, range.end, 0]);
+      }
+    }
+    lineStart = newLine + 1;
+  }
+  return {
+    text: virtual,
+    extension: '.ts',
+    mappings,
+    diagnosticDirectives: { unusedExpectDirectiveDiagnostics: unused, directives },
+    diagnostics,
+  };
+}
+
+const vuePrefix = 'missingSupplementalGlobal;\n';
+
+/**
+ * The mapper of `.vue` files: an empty module, with a supplemental file that is a line without an original and
+ * then the text.
+ */
+function transformVue(_fileName: string, text: string): ContentMapperResult {
+  return {
+    text: 'export {};',
+    extension: '.ts',
+    supplemental: [
+      { text: vuePrefix + text, extension: '.ts', mappings: [[vuePrefix.length, text.length, 0, text.length, 0]] },
+    ],
+  };
+}
+
+/** The mapper of `.box` files with a transform and a diagnostic source. */
+function boxMapperWith(
+  transform: (fileName: string, text: string) => ContentMapperResult,
+  diagnosticSource: string,
+): ContentMapper {
+  return { name: 'box-mapper', version: '1.0.0', diagnosticSource, extensions: ['.box'], transform };
+}
+
+const boxMapper = boxMapperWith(transformBox, 'box');
+const vueMapper: ContentMapper = {
+  name: 'vue-mapper',
+  diagnosticSource: 'mapper',
+  extensions: ['.vue'],
+  transform: transformVue,
+};
+
+/**
+ * The members of the files a content mapper produced, what their span maps answer at the ends of each segment,
+ * and the program with one more line in the first of them, which has an error.
+ */
+function probeMappedFiles(program: Program): void {
+  let first: SourceFile | undefined;
+  for (const file of program.getSourceFiles()) {
+    if (file.contentMapper === undefined) continue;
+    if (first === undefined && file.canonicalSourceFileName === undefined) first = file;
+    print(`mapped ${nodeText(file)} by ${file.contentMapper} as ${file.virtualFileName ?? '-'}`);
+    print(`  texts ${file.text.length} ${file.originalText.length} ${file.text === file.originalText}`);
+    print(`  canonical ${file.canonicalSourceFileName ?? '-'}`);
+    print(`  supplemental ${(file.supplementalSourceFileNames ?? []).join(',')}`);
+    for (const directive of file.diagnosticDirectives ?? [])
+      print(
+        `  directive ${directive.originalRange.pos}-${directive.originalRange.end} ` +
+          `${directive.virtualRange.pos}-${directive.virtualRange.end} ${directive.policy} ${directive.unusedCode}`,
+      );
+    const spanMap = file.spanMap;
+    if (spanMap === undefined) continue;
+    for (const segment of spanMap.segments) {
+      print(
+        `  segment ${segment.virtualStart}-${segment.virtualEnd} ${segment.originalStart}-${segment.originalEnd} ` +
+          `${segment.kind} ${segment.features}`,
+      );
+      for (const position of [segment.virtualStart - 1, segment.virtualStart, segment.virtualEnd]) {
+        const mapped = spanMap.virtualToOriginalPosition(position);
+        const span = spanMap.virtualToOriginalSpan({ pos: position, end: position + 2 });
+        const hover = spanMap.virtualToOriginalSpanForFeature(
+          { pos: position, end: position + 2 },
+          SpanMapFeature.Hover,
+        );
+        print(
+          `    virtual ${position} to ${mapped.position} ${mapped.fidelity} ${span.range.pos}-${span.range.end} ` +
+            `${span.fidelity} ${SpanMap.isExact(span.fidelity)} ${SpanMap.isNone(hover.fidelity)}`,
+        );
+      }
+      for (const position of [segment.originalStart, segment.originalEnd]) {
+        const positions = spanMap
+          .originalToVirtualPositions(position, SpanMapFeature.All)
+          .map((mapped) => `${mapped.position}:${mapped.fidelity}`);
+        const spans = spanMap
+          .originalToVirtualSpans({ pos: position - 1, end: position + 1 }, SpanMapFeature.All)
+          .map((mapped) => `${mapped.range.pos}-${mapped.range.end}:${mapped.fidelity}`);
+        print(`    original ${position} to ${positions.join(',')} spans ${spans.join(',')}`);
+      }
+    }
+  }
+  if (first === undefined) return;
+  for (const d of program.getSyntacticDiagnostics(first)) print(`  mapped syntactic ${diagnosticText(d)}`);
+  const text = first.originalText + 'const probeMapped: number = "text";\n';
+  const updated = program.updateFile(first.fileName, text);
+  print(`mapped update ${nodeText(first)} ${updated !== undefined}`);
+  if (updated === undefined) return;
+  const updatedFile = updated.getSourceFile(first.fileName)!;
+  print(`  texts ${updatedFile.text.length} ${updatedFile.originalText.length} ${first.originalText.length}`);
+  for (const d of updated.getSemanticDiagnostics(updatedFile)) print(`  semantic ${diagnosticText(d)}`);
+  // A transform that fails leaves the program to be created again, which reports the failure.
+  print(`mapped update that fails ${updated.updateFile(first.fileName, text + '// @box-fail\n') !== undefined}`);
+  updated.dispose();
+}
+
+/**
+ * The diagnostics of a program whose only file is a `.box` file that the host has in memory, for a mapper that
+ * throws, results that are not valid, and a mapper whose diagnostic source is reserved.
+ */
+function probeMapperFailures(directory: string, libDir: string): void {
+  const fileName = directory + '/probe-mapper-failure.box';
+  const results: [string, ContentMapper][] = [
+    ['throws', boxMapper],
+    ['extension', boxMapperWith(() => ({ text: '', extension: '.vue' }), 'box')],
+    ['mappings', boxMapperWith(() => ({ text: 'let a;', extension: '.ts', mappings: [[0, 9, 0, 9, 0]] }), 'box')],
+    ['verbatim', boxMapperWith(() => ({ text: 'let a;', extension: '.ts', mappings: [[0, 3, 0, 3, 0]] }), 'box')],
+    ['source', boxMapperWith(transformBox, 'ts')],
+    ['synthesized', boxMapperWith(() => ({ text: 'let a: string = 1;', extension: '.ts' }), 'box')],
+  ];
+  for (const [name, mapper] of results) {
+    const failing = createProgram({
+      rootNames: [fileName],
+      options: { noEmit: true, types: [] },
+      host: {
+        getCurrentDirectory: () => directory,
+        useCaseSensitiveFileNames: () => true,
+        getDefaultLibraryDirectory: () => libDir,
+        contentMappers: [mapper],
+        readFile: (path: string) => (path === fileName ? '// @box-fail\n' : undefined),
+        fileExists: (path: string) => (path === fileName ? true : undefined),
+      },
+    });
+    const file = failing.getSourceFile(fileName)!;
+    print(`mapper ${name} ${file.text.length} ${file.originalText.length} ${file.spanMap === undefined}`);
+    for (const d of getPreEmitDiagnostics(failing)) print(`  pre-emit ${diagnosticText(d)}`);
+    failing.dispose();
+  }
+}
+
 const args = process.argv.slice(2);
 const configFileName = args[0]!;
 const libDir = args[1]!;
 const directory = configFileName.substring(0, configFileName.lastIndexOf('/'));
 print('start');
-const host = {
+const host: ProgramHost = {
   getCurrentDirectory: () => directory,
   useCaseSensitiveFileNames: () => true,
   getDefaultLibraryDirectory: () => libDir,
+  contentMappers: [boxMapper, vueMapper],
 };
 const program = createProgramFromConfigFile(configFileName, host);
 probe(program, program.getTypeChecker());
 probeUpdate(program);
 probeOldProgram(program, createProgramFromConfigFile(configFileName, host, program));
+probeMappedFiles(program);
+probeMapperFailures(directory, libDir);
 const parsed = parseSourceFile(directory + '/parsed.ts', 'export const parsed = 1;\n');
 print(`parsed ${parsed.statements.nodes.length} ${parsed.statements.nodes[0]!.kind}`);
 try {

@@ -43,7 +43,7 @@ The default lib files (`lib.*.d.ts`) ship next to the executable. Set `TSC_TS_LI
 
 ## Programmatic API
 
-`tsc-ts/api` describes tsc-ts's programs, checkers, nodes, symbols, types and signatures in TypeScript, with the names and numbering of TypeScript 7's API (`typescript/unstable/sync`): the node interfaces, `Symbol`, `Type` and its kinds, `Signature`, `IndexInfo`, `TypePredicate`, `JSDocTagInfo`, `Diagnostic`, `Program`, `TypeChecker`, `CompilerOptions`, and the enums `SyntaxKind`, `NodeFlags`, `ModifierFlags`, `TokenFlags`, `SymbolFlags`, `TypeFlags`, `ObjectFlags`, `ElementFlags`, `SignatureFlags`, `SignatureKind`, `IndexKind`, `TypePredicateKind`, `TypeFormatFlags`, `NodeBuilderFlags`, `ScriptTarget`, `ModuleKind`, `ModuleResolutionKind`, `ModuleDetectionKind`, `ScriptKind`, `LanguageVariant`, `JsxEmit`, `NewLineKind`, `DiagnosticCategory` and `InternalSymbolName`.
+`tsc-ts/api` describes tsc-ts's programs, checkers, nodes, symbols, types and signatures in TypeScript, with the names and numbering of TypeScript 7's API (`typescript/unstable/sync`): the node interfaces, `Symbol`, `Type` and its kinds, `Signature`, `IndexInfo`, `TypePredicate`, `JSDocTagInfo`, `Diagnostic`, `Program`, `TypeChecker`, `CompilerOptions`, and the enums `SyntaxKind`, `NodeFlags`, `ModifierFlags`, `TokenFlags`, `SymbolFlags`, `TypeFlags`, `ObjectFlags`, `ElementFlags`, `SignatureFlags`, `SignatureKind`, `IndexKind`, `TypePredicateKind`, `TypeFormatFlags`, `NodeBuilderFlags`, `ScriptTarget`, `ModuleKind`, `ModuleResolutionKind`, `ModuleDetectionKind`, `ScriptKind`, `LanguageVariant`, `JsxEmit`, `NewLineKind`, `DiagnosticCategory`, `InternalSymbolName`, `SpanMapKind`, `SpanMapFeature`, `SpanMapFidelity` and `DiagnosticDirectivePolicy`.
 
 ```ts
 import { isIdentifier, type Node } from 'tsc-ts/api';
@@ -94,6 +94,48 @@ About a signature, it answers `getParameterType(signature, index)`, the type of 
 `createProgram({ rootNames, options, host, oldProgram })` and `createProgramFromConfigFile(configFileName, host, oldProgram)` take the parsed files of `oldProgram`, a program of `tsc-ts/api`, instead of parsing them again, where a file has the same name, text and module detection options, as TypeScript 5's `oldProgram` does with a host that keeps unchanged files. The new program resolves its modules and checks anew, so it answers what a program created without `oldProgram` answers, and it does not depend on the old program, which stays usable and is disposed of separately.
 
 `program.updateFile(fileName, text)` returns the program with one file's text replaced, as TypeScript 7 updates a program whose only change is one file: the new program takes every other file, the options and the module resolutions from the program it was called on, which stays as it was, so it is created in the time it takes to parse the file. It answers what a program created from the new text answers. It returns undefined when that needs a new program: the file is not in the program, is a `package.json`, belongs to a package installed more than once, or no longer imports, references or needs the same modules. The two programs are disposed of separately.
+
+### Files of content mappers
+
+A file a content mapper produced has the members of TypeScript 7's `SourceFile` for it. Its `text`, which its nodes are positions of, is the virtual text the mapper made, and `originalText` the text of the file on disk. `spanMap` is the `SpanMap` between the two; `contentMapper` the identity of the mapper (`name@version`); `virtualFileName` the name that decides how the text is parsed (`App.vue.ts`); `diagnosticDirectives` the directives of the original text, such as a framework's `@ts-expect-error`, each with its `originalRange`, its `virtualRange`, its `policy` (`DiagnosticDirectivePolicy`) and its `unusedCode`; `supplementalSourceFileNames` the names of the files the mapper produced with it, which are files of the program (`App.vue.0.ts`); and, for such a file, `canonicalSourceFileName` the name of the file it was produced with. A file no content mapper produced has its `text` as `originalText` and the other members undefined, as do the span map of the empty file that stands in for a transform that failed and the directives and supplemental names of a file without any.
+
+`SpanMap` is TypeScript 7's class, with its results: `segments`, each a range of the virtual text (`virtualStart`, `virtualEnd`), a range of the original (`originalStart`, `originalEnd`), a `kind` (`SpanMapKind`) and the `features` that use it (`SpanMapFeature`); `virtualToOriginalSpan(range)` and `virtualToOriginalPosition(position)`, which answer a range or a position of the original text and a `SpanMapFidelity` (`Exact` inside a verbatim segment, `Atom` inside any other, `Approximate` across segments, `None` in text the mapper synthesized), with `virtualToOriginalSpanForFeature` and `virtualToOriginalPositionForFeature` for one feature; `originalToVirtualSpans(range, feature)` and `originalToVirtualPositions(position, feature)`, which answer every projection of a range or a position of the original text; and `SpanMap.isExact`, `isSingleSegment` and `isNone`. `new SpanMap(segments)` makes one. Positions are UTF-16 offsets.
+
+```ts
+const file = program.getSourceFile('/project/src/App.vue')!;
+const [error] = program.getSemanticDiagnostics(file);
+// The diagnostic is already in the original text; a node of the file is in the virtual text.
+console.log(file.originalText.slice(error.pos, error.end));
+const mapped = file.spanMap!.virtualToOriginalSpan(file.statements.nodes[0]!);
+if (mapped.fidelity !== SpanMapFidelity.None) console.log(file.originalText.slice(mapped.range.pos, mapped.range.end));
+```
+
+The diagnostics of such a file are located as `tsc --api` returns them: in the original text where their range maps to it, under the name of the canonical file for a supplemental one. A diagnostic that lies entirely in text the mapper synthesized keeps its range of the virtual text, and its `messageChain` ends with TS18074, which says so. A diagnostic the mapper itself reported, and the error of a directive that suppressed nothing, has the mapper's prefix for its code as `source`, where a diagnostic of the compiler has undefined.
+
+TypeScript 7 runs a mapper as a process: a package that a config file's `contentMappers` name, started when the API is created with `runExternalCode`. `tsc-ts/api` starts no processes. Its programs treat a config file's `contentMappers` as TypeScript 7's API does without `runExternalCode`: the config reports TS18068 and the files are not in the program. Instead, and only in `tsc-ts/api`, the host runs content mappers itself: `contentMappers` of the host lists them, each with a `name` (and a `version`), the `extensions` it transforms, the `diagnosticSource` that prefixes the codes of its diagnostics, and `transform(fileName, text)`, which returns what a mapper process answers to the `transform` request of TypeScript 7's content mapper protocol: `text` and `extension` of the virtual file, its `mappings` as `[virtualStart, virtualLength, originalStart, originalLength, kind, features?]` tuples, its `diagnosticDirectives`, the `diagnostics` of the original text, and `supplemental` virtual files. Positions are UTF-16 offsets.
+
+```ts
+const program = createProgramFromConfigFile('tsconfig.json', {
+  getCurrentDirectory: () => process.cwd(),
+  useCaseSensitiveFileNames: () => process.platform === 'linux',
+  getDefaultLibraryDirectory: () => '/path/to/lib',
+  contentMappers: [
+    {
+      name: 'upper',
+      diagnosticSource: 'upper',
+      extensions: ['.upper'],
+      // The file as it is, mapped verbatim, after a line the mapper adds.
+      transform: (fileName, text) => ({
+        text: `declare const UPPER: string;\n${text}`,
+        extension: '.ts',
+        mappings: [[29, text.length, 0, text.length, SpanMapKind.Verbatim]],
+      }),
+    },
+  ],
+});
+```
+
+A program has the files with a host mapper's extensions as the mapper transforms them: as root files, as files a config file's `include` matches, and as modules an import names with the extension (`import './App.upper'`, under `moduleResolution: bundler`). What a mapper returns is decoded and checked by the code that checks the response of a mapper process, and what is wrong with it is reported as for a process: a result that is not valid, and a `transform` that throws, fail the transform of the file, which is then in the program empty, with TS18069 as its syntax error, until a mapper has failed five times, after which the program reports TS18070 and has the mapper's remaining files empty without asking it; a span map that does not fit the two texts has the diagnostic that names what is wrong with it (TS18072, TS18073, TS18081 to TS18083); a `diagnosticSource` that is blank or reserved is TS18099, once for the program; and an extension no mapper may register, such as one the compiler reads itself (TS18066), is a config file parsing diagnostic. `program.updateFile(fileName, text)` transforms a mapped file again, and returns undefined also when the transform fails or returns other supplemental files than before. A program created with `oldProgram` takes that program's file, and its supplemental files, for a mapped file whose text is the same and whose mapper has the same name, version and diagnostic source, without calling `transform`: a transform must depend on the file's name and text alone.
 
 `getPreEmitDiagnostics(program, sourceFile?)` returns a program's config file parsing, program, syntactic, global and semantic diagnostics, sorted and without duplicates, as TypeScript's function of that name does.
 

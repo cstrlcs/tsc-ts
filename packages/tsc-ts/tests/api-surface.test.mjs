@@ -63,8 +63,8 @@ function enumValues(files) {
 }
 
 test('the public enums number kinds and flags as tsc-ts does', () => {
-  const compiler = ['syntax-kind', 'ast', 'types', 'symbol', 'checker-types', 'options', 'diagnostics'].map((name) =>
-    join(root, `src/compiler/${name}.ts`),
+  const compiler = ['syntax-kind', 'ast', 'types', 'symbol', 'checker-types', 'options', 'diagnostics', 'span-map'].map(
+    (name) => join(root, `src/compiler/${name}.ts`),
   );
   const internal = enumValues(compiler);
   const exported = enumValues([join(root, 'src/library/enums.generated.ts')]);
@@ -81,6 +81,9 @@ test('the public enums number kinds and flags as tsc-ts does', () => {
   }
   assert.deepEqual(failures, []);
   assert.ok(compared > 750, `${compared} members compared`);
+  // The enums of span maps are among them: the API's span map hands the compiler's values out as they are.
+  for (const name of ['SpanMapKind', 'SpanMapFeature', 'SpanMapFidelity'])
+    assert.deepEqual([...exported.get(name)].sort(), [...internal.get(name)].sort(), name);
 });
 
 let apiExports;

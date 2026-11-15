@@ -1842,7 +1842,7 @@ class Encoder extends NodeVisitor {
       const file: SourceFile = node;
       const text = strings.addFileText(file.pos, file.end);
       // The text a content mapper transformed is a string of its own; any other file's is its text.
-      const originalText = file.originalText();
+      const originalText = file.originalText;
       const original = originalText !== file.text ? strings.add(originalText, SyntaxKind.Unknown, 0, 0) : text;
       out.u32(text);
       out.u32(strings.add(file.fileName, SyntaxKind.Unknown, 0, 0));
@@ -1860,15 +1860,15 @@ class Encoder extends NodeVisitor {
       out.u32(0);
       out.u32(original);
       // What a content mapper produced the file with; empty for any other file.
-      out.u32(writeSpanMap(this.structured, file.spanMap()));
+      out.u32(writeSpanMap(this.structured, file.contentMapperSpanMap()));
       out.u32(this.writeStrings(file.supplementalSourceFiles().map((supplemental) => supplemental.fileName)));
       const canonical = file.canonicalSourceFile();
       out.u32(canonical !== undefined ? strings.add(canonical.fileName, SyntaxKind.Unknown, 0, 0) : noStructuredData);
-      const contentMapper = file.contentMapper();
+      const contentMapper = file.contentMapperIdentity();
       out.u32(contentMapper !== '' ? strings.add(contentMapper, SyntaxKind.Unknown, 0, 0) : noStructuredData);
-      const virtualFileName = file.virtualFileName();
+      const virtualFileName = file.contentMapperVirtualFileName();
       out.u32(virtualFileName !== '' ? strings.add(virtualFileName, SyntaxKind.Unknown, 0, 0) : noStructuredData);
-      out.u32(writeDiagnosticDirectives(this.structured, file.diagnosticDirectives()));
+      out.u32(writeDiagnosticDirectives(this.structured, file.contentMapperDiagnosticDirectives()));
     } else throw new Error(`no extended data for kind ${node.kind}`);
     return offset;
   }

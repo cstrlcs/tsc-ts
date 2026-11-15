@@ -11,6 +11,7 @@ export { createProgram, createProgramFromConfigFile, getPreEmitDiagnostics, pars
 export { DisposedProgramError, InternalCompilerError } from './errors.js';
 export { parseSourceFile, type ParseSourceFileOptions } from './parse.js';
 export { getJSDocTags } from './jsdoc.js';
+export { type MappedPosition, type MappedRange, SpanMap, type SpanMapSegment } from './span-map.js';
 export {
   type CommentKind,
   type CommentRange,
@@ -45,6 +46,13 @@ export type {
   BigIntLiteralType,
   BooleanLiteralType,
   ConditionalType,
+  ContentMapper,
+  ContentMapperDiagnostic,
+  ContentMapperDiagnosticDirective,
+  ContentMapperDiagnosticDirectives,
+  ContentMapperMapping,
+  ContentMapperOutput,
+  ContentMapperResult,
   CreateProgramOptions,
   Diagnostic,
   FileSystemEntries,

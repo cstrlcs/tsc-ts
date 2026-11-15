@@ -66,7 +66,7 @@ export function getOutputPathsFor(
 ): OutputPaths {
   const fileName = file.fileName;
   const isJson = file.scriptKind === ScriptKind.JSON;
-  const isContentMapped = file.contentMapper() !== '';
+  const isContentMapped = file.contentMapperIdentity() !== '';
   const ownOutputFilePath = getOwnEmitOutputFilePath(
     fileName,
     options,

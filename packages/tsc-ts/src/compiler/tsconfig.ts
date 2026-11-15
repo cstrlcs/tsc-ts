@@ -1243,6 +1243,11 @@ export class ConfigParser {
    * extension leaves out.
    */
   beforeRootFiles: ((options: CompilerOptions) => ((fileName: string) => void) | undefined) | undefined = undefined;
+  /**
+   * Content mappers the host of the program runs itself (tsc-ts/api), which a parsed config has after the ones
+   * its `contentMappers` declare: their extensions count for its `include` patterns as those do.
+   */
+  hostContentMappers: readonly ContentMapper[] = [];
 
   constructor(
     readonly fs: FileSystem,
@@ -1385,6 +1390,7 @@ export class ConfigParser {
         : combinePaths(basePathForFileNames, 'tsconfig.json'),
       errors,
     );
+    for (const mapper of this.hostContentMappers) contentMappers.push(mapper);
 
     const literalFiles = new Map<string, string>();
     const beforeRootFiles = this.beforeRootFiles;

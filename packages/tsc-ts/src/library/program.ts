@@ -15,6 +15,7 @@ import { Program as CompilerProgram, sortAndDeduplicateDiagnostics } from '../co
 import { ConfigParser, ParsedCommandLine } from '../compiler/tsconfig.js';
 import type { SourceFile } from './ast.js';
 import { LibraryTypeChecker } from './checker.js';
+import { HostContentMappers } from './content-mappers.js';
 import type { CompilerOptions } from './compiler-options.generated.js';
 import { type DiagnosticKind, diagnosticOf, programDiagnostics } from './diagnostics.js';
 import { DisposedProgramError, internalError } from './errors.js';
@@ -34,12 +35,13 @@ import type {
  * A program of `rootNames` with `options`, reading files through `host`. It loads its files as `tsc-ts`
  * loads a project's: resolving imports and references from the root files, with the default libraries of
  * the options from the host's default library directory. It takes the parsed files of `oldProgram` that are
- * unchanged.
+ * unchanged. The files with the extensions of the host's content mappers are what the mappers make of them.
  */
 export function createProgram(options: CreateProgramOptions): Program {
   const oldProgram = compilerProgramOf(options.oldProgram);
+  const host = options.host;
+  const contentMappers = new HostContentMappers(host);
   try {
-    const host = options.host;
     const currentDirectory = host.getCurrentDirectory();
     const rootNames = options.rootNames.map((name) => getNormalizedAbsolutePath(name, currentDirectory));
     const config = new ParsedCommandLine(
@@ -48,12 +50,13 @@ export function createProgram(options: CreateProgramOptions): Program {
       rootNames,
       [],
       undefined,
-      [],
+      contentMappers.problems.slice(),
       currentDirectory,
       host.useCaseSensitiveFileNames(),
       rootNames.length,
     );
-    return programOf(config, host, oldProgram);
+    config.contentMappers = contentMappers.mappers;
+    return programOf(config, host, oldProgram, contentMappers);
   } catch (e) {
     throw internalError(e);
   }
@@ -67,8 +70,9 @@ export function createProgram(options: CreateProgramOptions): Program {
  */
 export function createProgramFromConfigFile(configFileName: string, host: ProgramHost, oldProgram?: Program): Program {
   const old = compilerProgramOf(oldProgram);
+  const contentMappers = new HostContentMappers(host);
   try {
-    return programOf(parsedConfig(configFileName, host).config, host, old);
+    return programOf(parsedConfig(configFileName, host, contentMappers).config, host, old, contentMappers);
   } catch (e) {
     throw internalError(e);
   }
@@ -79,8 +83,9 @@ export function createProgramFromConfigFile(configFileName: string, host: Progra
  * parseConfigFile returns them. A config file that can't be read gives one diagnostic and no files.
  */
 export function parseConfigFile(configFileName: string, host: ProgramHost): ParsedConfigFile {
+  const contentMappers = new HostContentMappers(host);
   try {
-    const { config, errors } = parsedConfig(configFileName, host);
+    const { config, errors } = parsedConfig(configFileName, host, contentMappers);
     return {
       options: compilerOptionsOf(config.options) as CompilerOptions,
       fileNames: config.fileNames.slice(),
@@ -91,19 +96,21 @@ export function parseConfigFile(configFileName: string, host: ProgramHost): Pars
   }
 }
 
+/**
+ * The config of a config file, with the content mappers of the host after the ones the file declares, which
+ * do not run without `--runExternalCode`, and what is wrong with the extensions of the host's among its errors.
+ */
 function parsedConfig(
   configFileName: string,
   host: ProgramHost,
+  contentMappers: HostContentMappers,
 ): { config: ParsedCommandLine; errors: CompilerDiagnostic[] } {
   const currentDirectory = host.getCurrentDirectory();
   const errors: CompilerDiagnostic[] = [];
+  const parser = new ConfigParser(new HostFileSystem(host), currentDirectory);
+  parser.hostContentMappers = contentMappers.mappers;
   const config =
-    new ConfigParser(new HostFileSystem(host), currentDirectory).parseConfigFile(
-      getNormalizedAbsolutePath(configFileName, currentDirectory),
-      undefined,
-      undefined,
-      errors,
-    ) ??
+    parser.parseConfigFile(getNormalizedAbsolutePath(configFileName, currentDirectory), undefined, undefined, errors) ??
     new ParsedCommandLine(
       {},
       undefined,
@@ -115,21 +122,31 @@ function parsedConfig(
       host.useCaseSensitiveFileNames(),
       0,
     );
+  for (const problem of contentMappers.problems) config.errors.push(problem);
   return { config, errors: config.errors };
 }
 
-function programOf(config: ParsedCommandLine, host: ProgramHost, oldProgram: CompilerProgram | undefined): Program {
+function programOf(
+  config: ParsedCommandLine,
+  host: ProgramHost,
+  oldProgram: CompilerProgram | undefined,
+  contentMappers: HostContentMappers,
+): Program {
   const fs = new CachedFileSystem(new HostFileSystem(host));
   const compilerHost = new LibraryCompilerHost(
     fs,
     host.getCurrentDirectory(),
     host.getDefaultLibraryDirectory(),
     oldProgram,
+    contentMappers.project(config.options),
   );
   // With the sources of referenced projects, as tsgo's project service creates the programs of `tsc --api`.
   const program = new CompilerProgram(config, compilerHost, new FileLoader(compilerHost, config, true));
   compilerHost.releaseOldProgram();
-  return new LibraryProgram(new CheckedProgram(program));
+  // The compiler's program is loaded: its host lets go of the mappers, as the command line's does, since a
+  // program that checker threads share holds only data.
+  compilerHost.closeContentMappers();
+  return new LibraryProgram(new CheckedProgram(program), contentMappers);
 }
 
 /** The compiler's program of an `oldProgram`, which must be a program of tsc-ts/api that is not disposed. */
@@ -156,7 +173,11 @@ class LibraryProgram implements Program {
   private typeChecker: LibraryTypeChecker | undefined = undefined;
   private disposed = false;
 
-  constructor(private readonly checked: CheckedProgram) {}
+  constructor(
+    private readonly checked: CheckedProgram,
+    /** The content mappers of the host the program was created with, which transform a file it updates. */
+    private readonly contentMappers: HostContentMappers,
+  ) {}
 
   private get program(): CompilerProgram {
     this.checkNotDisposed();
@@ -319,16 +340,17 @@ class LibraryProgram implements Program {
       // A package.json decides the module formats and resolutions of other files, as tsgo's project service checks.
       if (file === undefined || getBaseFileName(file.fileName) === 'package.json') return undefined;
       const host = program.host;
-      const next = program.updateFile(
-        file.path,
-        new LibraryCompilerHost(
-          new ReplacedFileSystem(host.fs, file.fileName, text),
-          host.currentDirectory,
-          host.defaultLibraryPath,
-        ),
+      const nextHost = new LibraryCompilerHost(
+        new ReplacedFileSystem(host.fs, file.fileName, text),
+        host.currentDirectory,
+        host.defaultLibraryPath,
+        undefined,
+        this.contentMappers.project(program.options),
       );
+      const next = program.updateFile(file.path, nextHost);
+      nextHost.closeContentMappers();
       if (next === undefined) return undefined;
-      return new LibraryProgram(new CheckedProgram(next));
+      return new LibraryProgram(new CheckedProgram(next), this.contentMappers);
     } catch (e) {
       throw internalError(e);
     }

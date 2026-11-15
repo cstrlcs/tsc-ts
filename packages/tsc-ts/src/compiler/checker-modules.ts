@@ -672,7 +672,8 @@ function checkRewrittenImportExtension(
     return;
   const shouldRewrite = shouldRewriteExtension(moduleReference, rewrites, useCaseSensitiveFileNames);
   const mappedSource =
-    file.contentMapper() !== '' && rewriteExtension(file.fileName, rewrites, useCaseSensitiveFileNames) !== undefined;
+    file.contentMapperIdentity() !== '' &&
+    rewriteExtension(file.fileName, rewrites, useCaseSensitiveFileNames) !== undefined;
   const resolvedUsingRewritableExtension =
     resolved.resolvedUsingTsExtension || (resolved.resolvedUsingExtraExtensions && mappedSource);
   if (!resolvedUsingRewritableExtension) {

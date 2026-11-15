@@ -150,7 +150,7 @@ export class EmitResult {
  */
 export function sourceFileMayBeEmitted(file: SourceFile, options: CompilerOptions, forceDtsEmit = false): boolean {
   if (file.isDeclarationFile) return false;
-  if (file.contentMapper() !== '' && !forceDtsEmit && !getEmitDeclarations(options)) return false;
+  if (file.contentMapperIdentity() !== '' && !forceDtsEmit && !getEmitDeclarations(options)) return false;
   if (file.scriptKind === ScriptKind.JSON) return options.outDir !== undefined && options.outDir !== '';
   return true;
 }
@@ -256,12 +256,12 @@ function emitDeclarationFile(
   printerOptions.onlyPrintJSDocStyle = true;
   printerOptions.omitBraceSourceMapPositions = true;
   // The declaration map of a file a content mapper produced leads to the text the mapper read.
-  const spanMap = file.spanMap();
+  const spanMap = file.contentMapperSpanMap();
   const printer = new Printer(
     printerOptions,
     context,
     declarationMap && spanMap !== undefined
-      ? new OriginalSourceMapSource(file.originalFileName(), file.originalText(), spanMap)
+      ? new OriginalSourceMapSource(file.originalFileName(), file.originalText, spanMap)
       : undefined,
   );
   const emitSourceMaps = declarationMap && !fileExtensionIs(file.fileName, '.json');

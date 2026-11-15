@@ -1,0 +1,12 @@
+export const strict = #{strict};
+export const greeting: string = 'hello';
+export const limit = 10;
+// @box-ignore
+const ignored: number = 'ignored';
+// @box-expect-error: Unused box directive.
+const fine = 1;
+// @box-expect-error: Unused box directive.
+const expected: number = 'expected';
+const mismatch: string = limit;
+export const version: number = __VERSION;
+export const open = #{unclosed

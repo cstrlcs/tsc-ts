@@ -1,0 +1,7 @@
+{
+  "extends": "./tsconfig.base.json",
+  "contentMappers": [
+    { "package": "box-mapper", "extensions": [".box"] },
+    { "package": "vue-mapper", "extensions": [".vue"] }
+  ]
+}

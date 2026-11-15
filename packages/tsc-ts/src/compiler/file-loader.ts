@@ -1864,7 +1864,7 @@ export class FileLoader {
     if (file === undefined) return;
     task.file = file;
     // The virtual extension of a content mapped file decides its module format.
-    const virtualFileName = file.virtualFileName();
+    const virtualFileName = file.contentMapperVirtualFileName();
     if (virtualFileName !== '')
       task.metadata = new SourceFileMetadata(
         task.metadata.packageJsonType,

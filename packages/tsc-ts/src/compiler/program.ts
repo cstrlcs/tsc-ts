@@ -198,7 +198,7 @@ export class Program implements OutputPathsHost {
     const file = processed.filesByPath.get(path);
     if (file === undefined) return undefined;
     let next: SourceFile | undefined;
-    if (file.contentMapper() === '')
+    if (file.contentMapperIdentity() === '')
       next = host.getSourceFile(file.fileName, file.path, file.externalModuleIndicatorOptions);
     else {
       const mapper = this.commandLine.getContentMapperForFileName(file.fileName);
@@ -244,9 +244,9 @@ export class Program implements OutputPathsHost {
 
   /** The content mapper of the project that produced `file`, or `undefined` if no content mapper did. */
   getContentMapper(file: SourceFile): ContentMapper | undefined {
-    if (file.contentMapper() === '') return undefined;
+    if (file.contentMapperIdentity() === '') return undefined;
     const mapper = this.commandLine.getContentMapperForFileName(file.fileName);
-    return mapper !== undefined && mapper.identity() === file.contentMapper() ? mapper : undefined;
+    return mapper !== undefined && mapper.identity() === file.contentMapperIdentity() ? mapper : undefined;
   }
 
   /** The file extensions the project's content mappers register. */
@@ -566,7 +566,7 @@ export class Program implements OutputPathsHost {
     if (file.isDeclarationFile) return false;
     // A content mapper or its build tool writes what runs for a file the mapper produced: emit has only its
     // declarations to write.
-    if (file.contentMapper() !== '' && !forceDtsEmit && !getEmitDeclarations(options)) return false;
+    if (file.contentMapperIdentity() !== '' && !forceDtsEmit && !getEmitDeclarations(options)) return false;
     if (this.isSourceFileFromExternalLibrary(file)) return false;
     if (forceDtsEmit) return true;
     if (this.getProjectReferenceFromSource(file.path) !== undefined) return false;
@@ -1363,7 +1363,7 @@ export class Program implements OutputPathsHost {
       // nothing for the file.
       for (const file of this.processed.files) {
         if (
-          file.contentMapper() === '' ||
+          file.contentMapperIdentity() === '' ||
           this.sourceFileMayBeEmitted(file, false) ||
           this.isSourceFileFromExternalLibrary(file) ||
           this.getProjectReferenceFromSource(file.path) !== undefined

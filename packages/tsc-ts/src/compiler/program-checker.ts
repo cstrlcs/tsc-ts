@@ -535,7 +535,7 @@ export class CheckedProgram {
  * directive that left none out, which the mapper worded, at the directive in the original text.
  */
 function applyContentMapperDiagnosticDirectives(file: SourceFile, diagnostics: Diagnostic[]): Diagnostic[] {
-  const directives = file.diagnosticDirectives();
+  const directives = file.contentMapperDiagnosticDirectives();
   if (directives.length === 0) return diagnostics;
   const used = new Set<number>();
   const result: Diagnostic[] = [];
