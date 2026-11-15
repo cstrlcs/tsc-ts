@@ -346,8 +346,10 @@ export interface JSDocTagInfo {
 
 export interface TypeChecker {
   getSymbolAtLocation(node: Node): Symbol | undefined;
-  getTypeAtLocation(node: Node): Type | undefined;
-  getTypeOfSymbol(symbol: Symbol): Type | undefined;
+  /** The type of the expression, type node or declaration at `node`; the error type for a node without one. */
+  getTypeAtLocation(node: Node): Type;
+  /** The type of a symbol's value; the error type for a symbol without one. */
+  getTypeOfSymbol(symbol: Symbol): Type;
   getDeclaredTypeOfSymbol(symbol: Symbol): Type;
   /** The type of a symbol as narrowed at `location`. */
   getTypeOfSymbolAtLocation(symbol: Symbol, location: Node): Type;
@@ -358,15 +360,21 @@ export interface TypeChecker {
   getPropertiesOfType(type: Type): readonly Symbol[];
   getSignaturesOfType(type: Type, kind: SignatureKind): readonly Signature[];
   getIndexInfosOfType(type: Type): readonly IndexInfo[];
-  getReturnTypeOfSignature(signature: Signature): Type | undefined;
+  /** The type a signature returns; `any` for a circular one and for a declaration with neither an annotation nor a body. */
+  getReturnTypeOfSignature(signature: Signature): Type;
   /**
    * The type of the parameter at `index`: a rest parameter's element type at and after its index, `any` after the
    * last parameter without one. A negative index throws a RangeError.
    */
   getParameterType(signature: Signature, index: number): Type;
   getTypePredicateOfSignature(signature: Signature): TypePredicate | undefined;
-  getSignatureFromDeclaration(node: Node): Signature | undefined;
-  getResolvedSignature(node: Node): Signature | undefined;
+  /** The signature of a function-like declaration; other nodes throw an InternalCompilerError, except a call the checker resolved. */
+  getSignatureFromDeclaration(node: Node): Signature;
+  /**
+   * The signature a call-like expression resolves to, or the unknown signature (isUnknownSignature) when it doesn't
+   * resolve; throws an InternalCompilerError for any other node.
+   */
+  getResolvedSignature(node: Node): Signature;
   getContextualType(node: Expression): Type | undefined;
   /** The symbols a module exports, `export *` ones included, without `export=` and other reserved names. */
   getExportsOfModule(symbol: Symbol): readonly Symbol[];
@@ -378,9 +386,12 @@ export interface TypeChecker {
    */
   getExportSpecifierLocalTargetSymbol(node: Node): Symbol | undefined;
   getShorthandAssignmentValueSymbol(node: Node): Symbol | undefined;
-  getTypeFromTypeNode(node: TypeNode): Type | undefined;
-  getBaseTypeOfLiteralType(type: Type): Type | undefined;
-  getNonNullableType(type: Type): Type | undefined;
+  /** The type a type node denotes; the error type for one that denotes none. */
+  getTypeFromTypeNode(node: TypeNode): Type;
+  /** The type literal types widen to (`number` for `42`), in each member of a union; any other type as it is. */
+  getBaseTypeOfLiteralType(type: Type): Type;
+  /** `type` without `null` and `undefined`; `type` itself without `strictNullChecks`. */
+  getNonNullableType(type: Type): Type;
   /** The type whose members a value of `type` has: the global interface of a primitive, the constraint of a type parameter. */
   getApparentType(type: Type): Type;
   /**

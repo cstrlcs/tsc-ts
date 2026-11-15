@@ -116,17 +116,17 @@ export class LibraryTypeChecker implements TypeChecker {
     }
   }
 
-  getTypeAtLocation(location: Node): Type | undefined {
+  getTypeAtLocation(location: Node): Type {
     try {
-      return publicType(getTypeAtLocation(this.c, node(location)));
+      return publicType(getTypeAtLocation(this.c, node(location)))!;
     } catch (e) {
       throw internalError(e);
     }
   }
 
-  getTypeOfSymbol(symbol: Symbol): Type | undefined {
+  getTypeOfSymbol(symbol: Symbol): Type {
     try {
-      return publicType(getTypeOfSymbol(this.c, compilerSymbol(symbol)));
+      return publicType(getTypeOfSymbol(this.c, compilerSymbol(symbol)))!;
     } catch (e) {
       throw internalError(e);
     }
@@ -203,9 +203,9 @@ export class LibraryTypeChecker implements TypeChecker {
     }
   }
 
-  getReturnTypeOfSignature(s: Signature): Type | undefined {
+  getReturnTypeOfSignature(s: Signature): Type {
     try {
-      return publicType(getReturnTypeOfSignature(this.c, signature(s)));
+      return publicType(getReturnTypeOfSignature(this.c, signature(s)))!;
     } catch (e) {
       throw internalError(e);
     }
@@ -236,17 +236,17 @@ export class LibraryTypeChecker implements TypeChecker {
     }
   }
 
-  getSignatureFromDeclaration(declaration: Node): Signature | undefined {
+  getSignatureFromDeclaration(declaration: Node): Signature {
     try {
-      return publicSignature(querySignatureFromDeclaration(this.c, node(declaration)));
+      return publicSignature(querySignatureFromDeclaration(this.c, node(declaration)))!;
     } catch (e) {
       throw internalError(e);
     }
   }
 
-  getResolvedSignature(call: Node): Signature | undefined {
+  getResolvedSignature(call: Node): Signature {
     try {
-      return publicSignature(queryResolvedSignature(this.c, node(call)));
+      return publicSignature(queryResolvedSignature(this.c, node(call)))!;
     } catch (e) {
       throw internalError(e);
     }
@@ -297,25 +297,25 @@ export class LibraryTypeChecker implements TypeChecker {
     }
   }
 
-  getTypeFromTypeNode(typeNode: TypeNode): Type | undefined {
+  getTypeFromTypeNode(typeNode: TypeNode): Type {
     try {
-      return publicType(getTypeFromTypeNode(this.c, node(typeNode)));
+      return publicType(getTypeFromTypeNode(this.c, node(typeNode)))!;
     } catch (e) {
       throw internalError(e);
     }
   }
 
-  getBaseTypeOfLiteralType(t: Type): Type | undefined {
+  getBaseTypeOfLiteralType(t: Type): Type {
     try {
-      return publicType(getBaseTypeOfLiteralType(this.c, type(t)));
+      return publicType(getBaseTypeOfLiteralType(this.c, type(t)))!;
     } catch (e) {
       throw internalError(e);
     }
   }
 
-  getNonNullableType(t: Type): Type | undefined {
+  getNonNullableType(t: Type): Type {
     try {
-      return publicType(getNonNullableType(this.c, type(t)));
+      return publicType(getNonNullableType(this.c, type(t)))!;
     } catch (e) {
       throw internalError(e);
     }

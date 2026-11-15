@@ -69,7 +69,7 @@ const checker = program.getTypeChecker();
 for (const file of program.getSourceFiles()) {
   if (program.isSourceFileDefaultLibrary(file)) continue;
   walkPreorder(file, (node) => {
-    if (node.kind === SyntaxKind.Identifier) console.log(checker.typeToString(checker.getTypeAtLocation(node)!));
+    if (node.kind === SyntaxKind.Identifier) console.log(checker.typeToString(checker.getTypeAtLocation(node)));
   });
 }
 program.dispose();
@@ -77,7 +77,7 @@ program.dispose();
 
 The host's `getDefaultLibraryDirectory()` names the directory with TypeScript 7's `lib.*.d.ts` files; the platform packages carry them in their `lib` directory. The host's `readFile`, `fileExists`, `directoryExists`, `realpath` and `getAccessibleEntries` are optional: where one is missing or answers undefined, the program reads the disk.
 
-The program's diagnostics, with their text and positions, are those `tsc --api` returns for the same project. `getTypeChecker()` returns a checker for queries, separate from the checker that reports the program's diagnostics, so queries don't change them. Its methods answer as the `tsc --api` requests of the same names; `getJsDocTagsOfSymbol(symbol)` answers as the `getJsDocTags` request: the JSDoc tags of a symbol's declarations, each with its `name` and, where it has one, its `text`, which is what the tag names or types followed by its comment. Nodes, symbols, types and signatures are tsc-ts's own objects, one per node, symbol, type and signature in a program, so they can be compared with `===` and used as Map keys.
+The program's diagnostics, with their text and positions, are those `tsc --api` returns for the same project. `getTypeChecker()` returns a checker for queries, separate from the checker that reports the program's diagnostics, so queries don't change them. Its methods answer as the `tsc --api` requests of the same names; `getJsDocTagsOfSymbol(symbol)` answers as the `getJsDocTags` request: the JSDoc tags of a symbol's declarations, each with its `name` and, where it has one, its `text`, which is what the tag names or types followed by its comment. The ones TypeScript 7 always answers return a type or a signature, never undefined: `getTypeAtLocation`, `getTypeOfSymbol` and `getTypeFromTypeNode` give the error type (`type.isErrorType()`) where there is no type, and `getResolvedSignature` the unknown signature for a call that doesn't resolve. Nodes, symbols, types and signatures are tsc-ts's own objects, one per node, symbol, type and signature in a program, so they can be compared with `===` and used as Map keys.
 
 The checker also answers about symbols as TypeScript 7's `Checker` does: `getExportsOfModule(symbol)` returns the symbols a module exports, those of its `export *` declarations included, in the checker's order of symbols; `getParentOfSymbol(symbol)` the symbol a symbol is a member or an export of, with its declarations merged (the `getParentOfSymbolForChecker` request of `tsc --api`; `symbol.getParent()` gives the parent as bound); `getExportSpecifierLocalTargetSymbol(node)` the symbol an export specifier exports; and `isUnknownSymbol(symbol)` whether a symbol is the one `getAliasedSymbol` returns for an alias that doesn't resolve.
 

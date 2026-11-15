@@ -103,8 +103,9 @@ function probe(program: Program, checker: TypeChecker): void {
 
   const types: Type[] = [];
   const seen = new Set<Type>();
-  const keep = (type: Type | undefined): string => {
-    if (type === undefined) return '-';
+  // The checker's answers are passed as a Type or a Signature where its methods always answer, so this file compiles
+  // only while their return types leave out undefined.
+  const keep = (type: Type): string => {
     if (!seen.has(type)) {
       seen.add(type);
       types.push(type);
@@ -139,14 +140,17 @@ function probe(program: Program, checker: TypeChecker): void {
       print(`  children ${childrenText(node)}`);
       print(`  tokens ${nodeText(getFirstToken(node))} ${nodeText(getLastToken(node, file))}`);
       print(`  type ${keep(checker.getTypeAtLocation(node))}`);
-      print(`  contextual ${keep(checker.getContextualType(node as Expression))}`);
+      const contextual = checker.getContextualType(node as Expression);
+      print(`  contextual ${contextual === undefined ? '-' : keep(contextual)}`);
+      if (SyntaxKind.FirstTypeNode <= node.kind && node.kind <= SyntaxKind.LastTypeNode)
+        print(`  type node ${keep(checker.getTypeFromTypeNode(node as TypeNode))}`);
+      if (signatureDeclarationKinds.includes(node.kind))
+        print(`  declared ${signatureText(checker, checker.getSignatureFromDeclaration(node))}`);
       if (node.kind === SyntaxKind.ExportSpecifier || node.kind === SyntaxKind.Identifier)
         print(`  export target ${symbolText(checker.getExportSpecifierLocalTargetSymbol(node))}`);
       if (node.kind === SyntaxKind.CallExpression || node.kind === SyntaxKind.NewExpression) {
         const signature = checker.getResolvedSignature(node);
-        print(
-          `  resolved ${signature === undefined ? '-' : `${nodeText(signature.declaration)} unknown ${checker.isUnknownSignature(signature)}`}`,
-        );
+        print(`  resolved ${nodeText(signature.declaration)} unknown ${checker.isUnknownSignature(signature)}`);
       }
     });
   }
@@ -188,6 +192,9 @@ function probe(program: Program, checker: TypeChecker): void {
     print(
       `  array ${checker.isArrayType(type)} tuple ${checker.isTupleType(type)} arrayLike ${checker.isArrayLikeType(type)}`,
     );
+    print(
+      `  literal base ${checker.typeToString(checker.getBaseTypeOfLiteralType(type))} non-nullable ${checker.typeToString(checker.getNonNullableType(type))}`,
+    );
     const text = (answer: Type | undefined): string => (answer === undefined ? '-' : checker.typeToString(answer));
     print(
       `  apparent ${text(checker.getApparentType(type))} constraint ${text(checker.getBaseConstraintOfType(type))}`,
@@ -203,6 +210,23 @@ function probe(program: Program, checker: TypeChecker): void {
     }
   }
 }
+
+/** The kinds of declarations getSignatureFromDeclaration takes. */
+const signatureDeclarationKinds: readonly SyntaxKind[] = [
+  SyntaxKind.FunctionDeclaration,
+  SyntaxKind.FunctionExpression,
+  SyntaxKind.ArrowFunction,
+  SyntaxKind.MethodDeclaration,
+  SyntaxKind.MethodSignature,
+  SyntaxKind.Constructor,
+  SyntaxKind.GetAccessor,
+  SyntaxKind.SetAccessor,
+  SyntaxKind.CallSignature,
+  SyntaxKind.ConstructSignature,
+  SyntaxKind.IndexSignature,
+  SyntaxKind.FunctionType,
+  SyntaxKind.ConstructorType,
+];
 
 /**
  * The answers of the program with new text for its last file: one more declaration, which has an error, and then one
@@ -224,8 +248,7 @@ function probeUpdate(program: Program): void {
   const checker = updated.getTypeChecker();
   walkPreorder(updatedFile, (node) => {
     if (node.pos < file.text.length) return;
-    const type = checker.getTypeAtLocation(node);
-    print(`  node ${nodeText(node)} ${type === undefined ? '-' : checker.typeToString(type)}`);
+    print(`  node ${nodeText(node)} ${checker.typeToString(checker.getTypeAtLocation(node))}`);
   });
   updated.dispose();
 }
@@ -315,8 +338,8 @@ function signatureText(checker: TypeChecker, signature: Signature): string {
   const parameterTypes: string[] = [];
   for (let index = 0; index <= signature.getParameters().length; index++)
     parameterTypes.push(checker.typeToString(checker.getParameterType(signature, index)));
-  const returnType = checker.getReturnTypeOfSignature(signature);
-  return `${signature.flags} ${nodeText(signature.declaration)} (${parameters}) [${parameterTypes.join('; ')}] ${returnType === undefined ? '-' : checker.typeToString(returnType)}`;
+  const returnType = checker.typeToString(checker.getReturnTypeOfSignature(signature));
+  return `${signature.flags} ${nodeText(signature.declaration)} (${parameters}) [${parameterTypes.join('; ')}] ${returnType}`;
 }
 
 const args = process.argv.slice(2);

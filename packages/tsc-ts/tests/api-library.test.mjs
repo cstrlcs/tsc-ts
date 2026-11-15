@@ -821,6 +821,77 @@ test('getWidenedType widens null and undefined as tsc --api without strictNullCh
   }
 });
 
+test('the queries TypeScript 7 always answers give a type or a signature at every node', { skip }, async () => {
+  const api = await load('library/index.js');
+  const callLikeKinds = new Set(
+    [
+      'CallExpression',
+      'NewExpression',
+      'TaggedTemplateExpression',
+      'Decorator',
+      'JsxOpeningElement',
+      'JsxSelfClosingElement',
+    ].map((name) => api.SyntaxKind[name]),
+  );
+  const asked = {
+    getTypeAtLocation: 0,
+    getTypeOfSymbol: 0,
+    getTypeFromTypeNode: 0,
+    getSignatureFromDeclaration: 0,
+    getResolvedSignature: 0,
+    getReturnTypeOfSignature: 0,
+    getBaseTypeOfLiteralType: 0,
+    getNonNullableType: 0,
+  };
+  const unanswered = [];
+  // Projects without errors, with syntactic and semantic errors, and without strictNullChecks.
+  for (const fixture of ['library', 'library-errors', 'library-loose']) {
+    const dir = tempDir('tsc-ts-library-');
+    cpSync(join(root, 'tests/fixtures', fixture), dir, { recursive: true });
+    const program = api.createProgramFromConfigFile(join(dir, 'tsconfig.json'), hostFor(dir));
+    const checker = program.getTypeChecker();
+    const ask = (method, argument, what) => {
+      asked[method]++;
+      const answer = checker[method](argument);
+      if (answer === undefined) unanswered.push(`${method} of ${what} in ${fixture}`);
+      return answer;
+    };
+    const types = new Set();
+    const signatures = new Set();
+    for (const file of program.getSourceFiles()) {
+      if (!file.fileName.startsWith(dir)) continue;
+      api.walkPreorder(file, (node) => {
+        const what = `${api.SyntaxKind[node.kind]} at ${node.pos} of ${file.fileName.slice(dir.length)}`;
+        types.add(ask('getTypeAtLocation', node, what));
+        if (api.SyntaxKind.FirstTypeNode <= node.kind && node.kind <= api.SyntaxKind.LastTypeNode)
+          types.add(ask('getTypeFromTypeNode', node, what));
+        if (signatureDeclarationKinds.has(node.kind)) signatures.add(ask('getSignatureFromDeclaration', node, what));
+        if (callLikeKinds.has(node.kind)) signatures.add(ask('getResolvedSignature', node, what));
+        const symbol = checker.getSymbolAtLocation(node);
+        if (symbol !== undefined) types.add(ask('getTypeOfSymbol', symbol, `the symbol of ${what}`));
+      });
+    }
+    types.delete(undefined);
+    signatures.delete(undefined);
+    for (const type of types) {
+      const what = checker.typeToString(type);
+      ask('getBaseTypeOfLiteralType', type, what);
+      ask('getNonNullableType', type, what);
+      for (const kind of [api.SignatureKind.Call, api.SignatureKind.Construct])
+        for (const signature of checker.getSignaturesOfType(type, kind)) signatures.add(signature);
+    }
+    for (const signature of signatures)
+      ask(
+        'getReturnTypeOfSignature',
+        signature,
+        signature.declaration === undefined ? 'a signature' : 'a declared one',
+      );
+    program.dispose();
+  }
+  assert.deepEqual(unanswered, []);
+  for (const [method, count] of Object.entries(asked)) assert.ok(count > 0, `${method} asked ${count} times`);
+});
+
 test('parseSourceFile parses as a one-file project of tsc --api', { skip, timeout: 300_000 }, async () => {
   const api = await load('library/index.js');
   const { encodeSourceFile } = await load('compiler/encoder.js');
