@@ -359,6 +359,11 @@ export interface TypeChecker {
   getSignaturesOfType(type: Type, kind: SignatureKind): readonly Signature[];
   getIndexInfosOfType(type: Type): readonly IndexInfo[];
   getReturnTypeOfSignature(signature: Signature): Type | undefined;
+  /**
+   * The type of the parameter at `index`: a rest parameter's element type at and after its index, `any` after the
+   * last parameter without one. A negative index throws a RangeError.
+   */
+  getParameterType(signature: Signature, index: number): Type;
   getTypePredicateOfSignature(signature: Signature): TypePredicate | undefined;
   getSignatureFromDeclaration(node: Node): Signature | undefined;
   getResolvedSignature(node: Node): Signature | undefined;
@@ -423,4 +428,6 @@ export interface TypeChecker {
   getBooleanType(): Type;
   /** Whether `symbol` is the checker's unknown symbol, which getAliasedSymbol gives for an alias that doesn't resolve. */
   isUnknownSymbol(symbol: Symbol): boolean;
+  /** Whether `signature` is the checker's unknown signature, which getResolvedSignature gives for a call that doesn't resolve. */
+  isUnknownSignature(signature: Signature): boolean;
 }

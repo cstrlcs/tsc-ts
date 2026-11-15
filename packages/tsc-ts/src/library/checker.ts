@@ -29,7 +29,11 @@ import {
   queryResolvedSignature,
   querySignatureFromDeclaration,
 } from '../compiler/checker-services.js';
-import { getReturnTypeOfSignature, getTypePredicateOfSignature } from '../compiler/checker-signatures.js';
+import {
+  getReturnTypeOfSignature,
+  getTypeAtPosition,
+  getTypePredicateOfSignature,
+} from '../compiler/checker-signatures.js';
 import { getTypeOfSymbol, getWidenedType } from '../compiler/checker-symbol-types.js';
 import { getParentOfSymbol, resolveAlias, resolveName } from '../compiler/checker-symbols.js';
 import {
@@ -202,6 +206,16 @@ export class LibraryTypeChecker implements TypeChecker {
   getReturnTypeOfSignature(s: Signature): Type | undefined {
     try {
       return publicType(getReturnTypeOfSignature(this.c, signature(s)));
+    } catch (e) {
+      throw internalError(e);
+    }
+  }
+
+  /** The parameter's type; a negative index is the caller's error, as `tsc --api` answers it, not the compiler's. */
+  getParameterType(s: Signature, index: number): Type {
+    if (index < 0) throw new RangeError('invalid parameter index');
+    try {
+      return publicType(getTypeAtPosition(this.c, signature(s), index))!;
     } catch (e) {
       throw internalError(e);
     }
@@ -475,5 +489,9 @@ export class LibraryTypeChecker implements TypeChecker {
 
   isUnknownSymbol(symbol: Symbol): boolean {
     return compilerSymbol(symbol) === this.c.unknownSymbol;
+  }
+
+  isUnknownSignature(s: Signature): boolean {
+    return signature(s) === this.c.unknownSignature;
   }
 }

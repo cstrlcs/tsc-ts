@@ -144,7 +144,9 @@ function probe(program: Program, checker: TypeChecker): void {
         print(`  export target ${symbolText(checker.getExportSpecifierLocalTargetSymbol(node))}`);
       if (node.kind === SyntaxKind.CallExpression || node.kind === SyntaxKind.NewExpression) {
         const signature = checker.getResolvedSignature(node);
-        print(`  resolved ${signature === undefined ? '-' : nodeText(signature.declaration)}`);
+        print(
+          `  resolved ${signature === undefined ? '-' : `${nodeText(signature.declaration)} unknown ${checker.isUnknownSignature(signature)}`}`,
+        );
       }
     });
   }
@@ -309,8 +311,12 @@ function isTupleTypeReference(type: Type): type is TupleTypeReference {
 
 function signatureText(checker: TypeChecker, signature: Signature): string {
   const parameters = signature.getParameters().map(symbolName).join(',');
+  // The types of the parameters and of the position after them: a rest parameter's element type, or any.
+  const parameterTypes: string[] = [];
+  for (let index = 0; index <= signature.getParameters().length; index++)
+    parameterTypes.push(checker.typeToString(checker.getParameterType(signature, index)));
   const returnType = checker.getReturnTypeOfSignature(signature);
-  return `${signature.flags} ${nodeText(signature.declaration)} (${parameters}) ${returnType === undefined ? '-' : checker.typeToString(returnType)}`;
+  return `${signature.flags} ${nodeText(signature.declaration)} (${parameters}) [${parameterTypes.join('; ')}] ${returnType === undefined ? '-' : checker.typeToString(returnType)}`;
 }
 
 const args = process.argv.slice(2);

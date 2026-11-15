@@ -307,6 +307,8 @@ test('symbols, types and signatures answer as tsc --api', { skip, timeout: 600_0
     let otherNodeChecked = false;
     let unknownSymbols = 0;
     let moduleExports = 0;
+    let unknownSignatures = 0;
+    let negativeIndexChecked = false;
     const answers = {
       apparent: 0,
       constraint: 0,
@@ -315,6 +317,7 @@ test('symbols, types and signatures answer as tsc --api', { skip, timeout: 600_0
       notAwaitable: 0,
       stringIndex: 0,
       numberIndex: 0,
+      restParameter: 0,
     };
     const seen = new Set();
     const visitType = (lib, ref, what) => {
@@ -327,6 +330,7 @@ test('symbols, types and signatures answer as tsc --api', { skip, timeout: 600_0
       pairs.push([lib, ref, what, (lib.flags & api.TypeFlags.Object) !== 0 ? lib.objectFlags >>> 0 : 0]);
     };
 
+    const wellKnownSignatures = await tsgo.json('getWellKnownSignatures', base);
     // Symbols and types at every identifier and expression of the user files.
     const symbols = [];
     for (const file of program.getSourceFiles()) {
@@ -352,6 +356,15 @@ test('symbols, types and signatures answer as tsc --api', { skip, timeout: 600_0
             refSignature?.declaration ?? null,
             `resolved signature at ${location}`,
           );
+          if (signature !== undefined && refSignature !== null) {
+            // A call that doesn't resolve gives the unknown signature.
+            expect(
+              checker.isUnknownSignature(signature),
+              refSignature.id === wellKnownSignatures.unknown,
+              `unknown signature at ${location}`,
+            );
+            if (checker.isUnknownSignature(signature)) unknownSignatures++;
+          }
         }
         if (api.SyntaxKind.FirstTypeNode <= node.kind && node.kind <= api.SyntaxKind.LastTypeNode) {
           visitType(
@@ -644,6 +657,27 @@ test('symbols, types and signatures answer as tsc --api', { skip, timeout: 600_0
               (await tsgo.json('getParametersOfSignature', { ...base, objectId: refSig.id })).map(describeTsgoSymbol),
               `parameters of ${where}`,
             );
+            expect(checker.isUnknownSignature(sig), refSig.id === wellKnownSignatures.unknown, `unknown ${where}`);
+            // The parameters, and two positions after them: a rest parameter's element type, or any.
+            const parameterCount = sig.getParameters().length;
+            for (let index = 0; index < parameterCount + 2; index++) {
+              const parameterType = checker.getParameterType(sig, index);
+              await sameType(
+                parameterType,
+                await tsgo.json('getParameterType', { ...base, signature: refSig.id, index }),
+                `parameter type ${index} of ${where}`,
+              );
+              if (index >= parameterCount && parameterType !== checker.getAnyType()) answers.restParameter++;
+            }
+            if (!negativeIndexChecked) {
+              // tsgo refuses a negative index as its client's error, and the library throws a RangeError.
+              negativeIndexChecked = true;
+              assert.throws(() => checker.getParameterType(sig, -1), RangeError);
+              await assert.rejects(
+                tsgo.json('getParameterType', { ...base, signature: refSig.id, index: -1 }),
+                /client error: invalid parameter index/,
+              );
+            }
             visitType(
               checker.getReturnTypeOfSignature(sig),
               await tsgo.json('getReturnTypeOfSignature', { ...base, objectId: refSig.id }),
@@ -746,6 +780,7 @@ test('symbols, types and signatures answer as tsc --api', { skip, timeout: 600_0
     assert.ok(pairs.length > 200, `${pairs.length} types compared`);
     assert.ok(unknownSymbols > 0, 'an alias that resolves to the unknown symbol');
     assert.ok(moduleExports > 0, 'a module with exports of its own and of an `export *`');
+    assert.ok(unknownSignatures > 0, 'a call that resolves to the unknown signature');
     for (const [answer, count] of Object.entries(answers)) assert.ok(count > 0, `${answer}: ${count} types`);
   } finally {
     await tsgo.close();

@@ -29,4 +29,6 @@ const fromGeneric = generic('abc');
 const json = JSON.stringify({ pair, keys, loud, route, element, picked, looked, maybe, color, flags, literal, values, record, shorthand, fromGeneric });
 if (isPoint(json)) overloaded(json.x);
 overloaded('s');
+// @ts-expect-error A call of a value without call signatures resolves to the unknown signature.
+x();
 export { types, json };
