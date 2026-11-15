@@ -1,22 +1,38 @@
-// The JSDoc tags of a node, as TypeScript 7's API gives them (getJSDocTags): those of the node's own JSDoc
-// comments, of the comments of its initializer and of the declarations and statements that document it, and,
-// for a parameter or type parameter, the `@param` or `@template` tags of the declaration it belongs to.
+// JSDoc tags, as TypeScript 7's API gives them. Those of a node (getJSDocTags): the tags of the node's own
+// JSDoc comments, of the comments of its initializer and of the declarations and statements that document
+// it, and, for a parameter or type parameter, the `@param` or `@template` tags of the declaration it belongs
+// to. And those of a symbol (getJsDocTagsOfSymbol): the tags of its declarations, with their text.
 
 import {
+  getComment,
   getInitializer,
   getName,
   getParameters,
+  getTagName,
   getText,
   JSDoc as CompilerJSDoc,
+  JSDocAugmentsTag,
+  JSDocImplementsTag,
+  JSDocParameterOrPropertyTag,
+  JSDocSatisfiesTag,
+  JSDocSeeTag,
   JSDocTemplateTag,
+  JSDocText,
+  JSDocThrowsTag,
+  JSDocTypeTag,
   type Node as CompilerNode,
+  NodeFlags,
+  type NodeList as CompilerNodeList,
   type SourceFile as CompilerSourceFile,
   VariableDeclarationList,
 } from '../compiler/ast.js';
+import { getTextOfNodeFromSourceText } from '../compiler/ast-utilities.js';
 import { getSourceFileOfNode } from '../compiler/binder-utilities.js';
 import { getJSDoc } from '../compiler/parser.js';
+import { getDeclarations, type Symbol as CompilerSymbol } from '../compiler/symbol.js';
 import { SyntaxKind } from '../compiler/syntax-kind.js';
 import type { JSDocTag, Node } from './ast.js';
+import type { JSDocTagInfo, Symbol } from './types.js';
 
 /** Whether a node is a variable-like declaration: the JSDoc comments of its initializer also document it. */
 function isVariableLike(node: CompilerNode): boolean {
@@ -149,4 +165,90 @@ function jsDocTagsOf(hostNode: CompilerNode): CompilerNode[] {
  */
 export function getJSDocTags(node: Node): readonly JSDocTag[] {
   return jsDocTagsOf(node as unknown as CompilerNode) as unknown as readonly JSDocTag[];
+}
+
+/** The tags of the last JSDoc comment of a declaration, or of the nearest statement or declaration documenting it that has one. */
+function declarationJSDocTags(node: CompilerNode): readonly CompilerNode[] {
+  if ((node.flags & NodeFlags.JSDoc) !== 0) return [];
+  const file = getSourceFileOfNode(node);
+  for (
+    let current: CompilerNode | undefined = node;
+    current !== undefined;
+    current = getNextJSDocCommentLocation(current)
+  ) {
+    const comments = getJSDoc(file, current);
+    if (comments.length === 0) continue;
+    const last = comments[comments.length - 1]!;
+    if (last instanceof CompilerJSDoc && last.tags !== undefined) return last.tags.nodes;
+  }
+  return [];
+}
+
+function textOfNode(node: CompilerNode): string {
+  return getTextOfNodeFromSourceText(getSourceFileOfNode(node).text, node);
+}
+
+/** The text of a JSDoc comment, with its links as written and without the whitespace at its end. */
+function getTextOfJSDocComment(comment: CompilerNodeList | undefined): string {
+  if (comment === undefined) return '';
+  let text = '';
+  for (const part of comment.nodes) text += part instanceof JSDocText ? part.text : textOfNode(part);
+  return text.trimEnd();
+}
+
+/** The text of a tag: what the tag names or types, then its comment. */
+function getJSDocTagText(tag: CompilerNode): string {
+  const comment = getTextOfJSDocComment(getComment(tag));
+  const withComment = (text: string): string => (comment === '' ? text : text + ' ' + comment);
+  if (tag instanceof JSDocThrowsTag)
+    return tag.typeExpression !== undefined ? withComment(textOfNode(tag.typeExpression)) : comment;
+  if (tag instanceof JSDocImplementsTag) return withComment(textOfNode(tag.className));
+  if (tag instanceof JSDocAugmentsTag) return withComment(textOfNode(tag.className));
+  if (tag instanceof JSDocTemplateTag) {
+    let text = tag.constraint !== undefined ? textOfNode(tag.constraint) : '';
+    const typeParameters = tag.typeParameters.nodes;
+    for (let i = 0; i < typeParameters.length; i++) {
+      if (i === 0 && text !== '') text += ' ';
+      if (i !== 0) text += ', ';
+      text += textOfNode(typeParameters[i]!);
+    }
+    if (comment === '') return text;
+    return text === '' ? comment : text + ' ' + comment;
+  }
+  if (tag instanceof JSDocTypeTag)
+    return withComment(tag.typeExpression !== undefined ? textOfNode(tag.typeExpression) : '');
+  if (tag instanceof JSDocSatisfiesTag) return withComment(textOfNode(tag.typeExpression));
+  if (tag instanceof JSDocSeeTag)
+    return tag.nameExpression !== undefined ? withComment(textOfNode(tag.nameExpression)) : comment;
+  if (tag instanceof JSDocParameterOrPropertyTag) return withComment(textOfNode(tag.name));
+  return comment;
+}
+
+/**
+ * The JSDoc tags of a symbol's declarations, as tsgo's GetSymbolJSDocTags collects them: for each
+ * declaration, the tags of its last JSDoc comment, or of the nearest statement or declaration documenting
+ * it that has one. A comment with a `@typedef` or `@callback` tag documents no declaration, unless it also
+ * has a `@param` or `@return` tag.
+ */
+export function getSymbolJSDocTags(symbol: Symbol): JSDocTagInfo[] {
+  const infos: JSDocTagInfo[] = [];
+  const seen = new Set<CompilerNode>();
+  for (const declaration of getDeclarations(symbol as unknown as CompilerSymbol)) {
+    if (seen.has(declaration)) continue;
+    seen.add(declaration);
+    const tags = declarationJSDocTags(declaration);
+    let hasTypedef = false;
+    let hasParamOrReturn = false;
+    for (const tag of tags) {
+      if (tag.kind === SyntaxKind.JSDocTypedefTag || tag.kind === SyntaxKind.JSDocCallbackTag) hasTypedef = true;
+      if (tag.kind === SyntaxKind.JSDocParameterTag || tag.kind === SyntaxKind.JSDocReturnTag) hasParamOrReturn = true;
+    }
+    if (hasTypedef && !hasParamOrReturn) continue;
+    for (const tag of tags) {
+      const name = getText(getTagName(tag)!);
+      const text = getJSDocTagText(tag);
+      infos.push(text === '' ? { name } : { name, text });
+    }
+  }
+  return infos;
 }

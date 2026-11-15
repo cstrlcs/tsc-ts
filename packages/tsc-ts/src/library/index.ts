@@ -55,6 +55,7 @@ export type {
   InterfaceType,
   IntersectionType,
   IntrinsicType,
+  JSDocTagInfo,
   LiteralType,
   NumberLiteralType,
   ObjectType,

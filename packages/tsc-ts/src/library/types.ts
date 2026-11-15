@@ -327,6 +327,12 @@ export interface Program {
   dispose(): void;
 }
 
+/** A JSDoc tag of a symbol: its name, without the `@`, and its text, where it has one. */
+export interface JSDocTagInfo {
+  readonly name: string;
+  readonly text?: string | undefined;
+}
+
 export interface TypeChecker {
   getSymbolAtLocation(node: Node): Symbol | undefined;
   getTypeAtLocation(node: Node): Type | undefined;
@@ -352,6 +358,8 @@ export interface TypeChecker {
   getNonNullableType(type: Type): Type | undefined;
   getBaseTypes(type: InterfaceType): readonly Type[];
   getConstantValue(node: Node): string | number | undefined;
+  /** The JSDoc tags of a symbol's declarations, in source order, each with its text as a plain string. */
+  getJsDocTagsOfSymbol(symbol: Symbol): readonly JSDocTagInfo[];
   isArrayType(type: Type): boolean;
   isTupleType(type: Type): boolean;
   isArrayLikeType(type: Type): boolean;

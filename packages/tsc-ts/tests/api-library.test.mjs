@@ -1393,6 +1393,45 @@ test('getJSDocTags gives the tags TypeScript gives', { skip }, async () => {
   assert.deepEqual(tagsOf(SyntaxKind.ParenthesizedExpression, '(local)'), ['type']);
 });
 
+test('getJsDocTagsOfSymbol gives the tags tsc --api gives', { skip, timeout: 300_000 }, async () => {
+  const names = new Set();
+  let symbols = 0;
+  let tags = 0;
+  // TypeScript sources with documented declarations, and a project with JavaScript files, whose tags have types.
+  for (const fixture of ['library', 'services']) {
+    const { api, dir, program, checker, tsgo, base, handle } = await open(fixture);
+    try {
+      const seen = new Set();
+      for (const file of program.getSourceFiles()) {
+        if (!file.fileName.startsWith(dir)) continue;
+        const locations = [];
+        api.walkPreorder(file, (node) => {
+          if (node !== file) locations.push(node);
+        });
+        for (const node of locations) {
+          const symbol = checker.getSymbolAtLocation(node);
+          if (symbol === undefined || seen.has(symbol)) continue;
+          seen.add(symbol);
+          const location = handle(node);
+          const reference = await tsgo.json('getSymbolAtLocation', { ...base, location });
+          const expected = (await tsgo.json('getJsDocTags', { ...base, symbol: reference.reference })) ?? [];
+          const actual = checker.getJsDocTagsOfSymbol(symbol);
+          assert.deepEqual(actual, expected, `${fixture}: tags of ${api.symbolName(symbol)} at ${location}`);
+          symbols++;
+          tags += actual.length;
+          for (const tag of actual) names.add(tag.name);
+        }
+      }
+    } finally {
+      await tsgo.close();
+    }
+  }
+  assert.ok(symbols > 400 && tags > 60, `${tags} tags of ${symbols} symbols`);
+  // Tags whose text is what the tag names or types, then its comment; and a tag without text.
+  for (const name of ['param', 'template', 'throws', 'see', 'type', 'satisfies', 'implements', 'augments', 'abstract'])
+    assert.ok(names.has(name), `a @${name} tag`);
+});
+
 test('a program takes a file parse threads prepared only when the host gives the same text', { skip }, async () => {
   const api = await load('library/index.js');
   const { parallelParse, PreparedFile } = await load('compiler/parallel-parse.js');

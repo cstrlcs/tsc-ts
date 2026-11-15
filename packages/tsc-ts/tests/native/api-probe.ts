@@ -146,6 +146,8 @@ function probe(program: Program, checker: TypeChecker): void {
     print(`symbol ${symbolText(symbol)}`);
     print(`  type ${keep(checker.getTypeOfSymbol(symbol))}`);
     print(`  declared ${keep(checker.getDeclaredTypeOfSymbol(symbol))}`);
+    for (const tag of checker.getJsDocTagsOfSymbol(symbol))
+      print(`  tag ${tag.name} ${JSON.stringify(tag.text ?? '')}`);
     if ((symbol.flags & SymbolFlags.Alias) !== 0) print(`  aliased ${symbolText(checker.getAliasedSymbol(symbol))}`);
     print(`  parent ${symbolText(symbol.getParent())}`);
     print(`  members ${[...symbol.getMembers().keys()].sort().join(',')}`);

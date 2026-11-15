@@ -49,9 +49,11 @@ import { typeToString } from '../compiler/type-printer.js';
 import type { Expression, Identifier, Node, TypeNode } from './ast.js';
 import { SignatureKind, SymbolFlags, TypeFormatFlags, type TypePredicateKind } from './enums.generated.js';
 import { internalError } from './errors.js';
+import { getSymbolJSDocTags } from './jsdoc.js';
 import type {
   IndexInfo,
   InterfaceType,
+  JSDocTagInfo,
   Signature,
   Symbol,
   Type,
@@ -280,6 +282,14 @@ export class LibraryTypeChecker implements TypeChecker {
   getConstantValue(location: Node): string | number | undefined {
     try {
       return getConstantValue(this.c, node(location));
+    } catch (e) {
+      throw internalError(e);
+    }
+  }
+
+  getJsDocTagsOfSymbol(symbol: Symbol): readonly JSDocTagInfo[] {
+    try {
+      return getSymbolJSDocTags(symbol);
     } catch (e) {
       throw internalError(e);
     }
