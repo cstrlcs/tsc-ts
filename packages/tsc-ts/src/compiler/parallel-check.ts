@@ -39,6 +39,7 @@ import {
   type DiagnosticFormatOptions,
   formatDiagnostic,
   formattedReports,
+  noMessage,
   RepopulateInfo,
 } from './diagnostics.js';
 import { EmitOnly, EmitResult } from './emitter.js';
@@ -227,7 +228,8 @@ export const recycleFiles: number = Math.max(0, Number(process.env.TSC_TS_RECYCL
  * declaration diagnostic lists, the global diagnostics and the emit results, each list as a count
  * followed by that many items. A diagnostic is file name (an index into `strs`, -1 for none), file
  * text (index, -1 when the program has the file), pos, end, code, category, message,
- * skippedOnNoEmit, the argument count and indices, its repopulate kind (0 for none) followed by the
+ * skippedOnNoEmit, the argument count and indices, for an external diagnostic (`noMessage`) its source
+ * and text (indices), its repopulate kind (0 for none) followed by the
  * module reference (index), mode and package name (index) of other kinds, then its message chain and
  * related information as lists. A diagnostic of a reported list (the files' diagnostic and declaration
  * diagnostic lists, the global diagnostics and an emit result's diagnostics) is followed by its text in
@@ -318,6 +320,8 @@ class ResultPacker {
       );
     nums.push(d.pos, d.end, d.code, d.category, d.message, d.skippedOnNoEmit ? 1 : 0, d.args.length);
     for (const arg of d.args) nums.push(this.str(arg));
+    // An external diagnostic has a source and a text in place of a message.
+    if (d.message === noMessage) nums.push(this.str(d.source), this.str(d.messageText));
     const repopulate = d.repopulateInfo;
     if (repopulate === undefined) nums.push(0);
     else
@@ -423,6 +427,10 @@ class ResultUnpacker {
     result.code = code;
     result.category = category;
     result.skippedOnNoEmit = skipped;
+    if (message === noMessage) {
+      result.source = strs[this.next()]!;
+      result.messageText = strs[this.next()]!;
+    }
     const kind = this.next();
     if (kind !== 0) {
       const moduleReference = strs[this.next()]!;
@@ -2610,6 +2618,8 @@ class Revival {
     const result = new Diagnostic(file, copy.pos, copy.end, copy.message, copy.args);
     result.code = copy.code;
     result.category = copy.category;
+    result.source = copy.source;
+    result.messageText = copy.messageText;
     result.skippedOnNoEmit = copy.skippedOnNoEmit;
     const repopulate = copy.repopulateInfo;
     if (repopulate !== undefined)

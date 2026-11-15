@@ -2,6 +2,15 @@
 // translations, locale matching, message formatting and diagnostic output
 // for the JSON request in the file named by the first argument, as JSON on
 // stdout.
+//
+// A file of a render may be one a content mapper produced ("mapped": the
+// mapper's name, the original text, the span map as the tuples a mapper
+// sends, with UTF-16 offsets, or none for the empty file of a failed
+// transform, and the index of the canonical file of a supplemental one),
+// and a diagnostic may be a mapper's own ("source", "code" and "text" in
+// place of a key, at a range of the original text). "problems" are span
+// maps to validate against their texts; the answer to each is the
+// diagnostic the compiler reports for an invalid one.
 package main
 
 import (
@@ -13,26 +22,40 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf16"
 	_ "unsafe"
 
 	tsast "github.com/microsoft/TypeScript/tsc/internal/ast"
+	_ "github.com/microsoft/TypeScript/tsc/internal/compiler"
 	"github.com/microsoft/TypeScript/tsc/internal/core"
 	"github.com/microsoft/TypeScript/tsc/internal/diagnostics"
 	"github.com/microsoft/TypeScript/tsc/internal/diagnosticwriter"
 	"github.com/microsoft/TypeScript/tsc/internal/locale"
 	tsparser "github.com/microsoft/TypeScript/tsc/internal/parser"
+	"github.com/microsoft/TypeScript/tsc/internal/spanmap"
 	"github.com/microsoft/TypeScript/tsc/internal/tspath"
 )
 
 //go:linkname keyToMessage github.com/microsoft/TypeScript/tsc/internal/diagnostics.keyToMessage
 func keyToMessage(key diagnostics.Key) *diagnostics.Message
 
+//go:linkname contentMapperMappingDiagnostic github.com/microsoft/TypeScript/tsc/internal/compiler.contentMapperMappingDiagnostic
+func contentMapperMappingDiagnostic(file *tsast.SourceFile, label string, problem *spanmap.MappingError) *tsast.Diagnostic
+
+type mapped struct {
+	Mapper    string          `json:"mapper"`
+	Original  string          `json:"original"`
+	Mappings  json.RawMessage `json:"mappings"`
+	Canonical *int            `json:"canonical"`
+}
+
 type file struct {
-	Name string `json:"name"`
-	Text string `json:"text"`
+	Name   string  `json:"name"`
+	Text   string  `json:"text"`
+	Mapped *mapped `json:"mapped"`
 }
 
 type diagnostic struct {
@@ -43,6 +66,16 @@ type diagnostic struct {
 	Args    []string     `json:"args"`
 	Chain   []diagnostic `json:"chain"`
 	Related []diagnostic `json:"related"`
+	Source  string       `json:"source"`
+	Code    int32        `json:"code"`
+	Text    string       `json:"text"`
+}
+
+type problem struct {
+	Label    string          `json:"label"`
+	Virtual  string          `json:"virtual"`
+	Original string          `json:"original"`
+	Mappings json.RawMessage `json:"mappings"`
 }
 
 type render struct {
@@ -61,10 +94,11 @@ type format struct {
 }
 
 type request struct {
-	Locales []string `json:"locales"`
-	Matches []string `json:"matches"`
-	Formats []format `json:"formats"`
-	Renders []render `json:"renders"`
+	Locales  []string  `json:"locales"`
+	Matches  []string  `json:"matches"`
+	Formats  []format  `json:"formats"`
+	Renders  []render  `json:"renders"`
+	Problems []problem `json:"problems"`
 }
 
 type message struct {
@@ -82,6 +116,8 @@ type rendered struct {
 	Summary   string   `json:"summary"`
 	Flattened []string `json:"flattened"`
 	Status    []string `json:"status"`
+	Order     []int    `json:"order"`
+	Equal     []bool   `json:"equal"`
 }
 
 type response struct {
@@ -90,6 +126,7 @@ type response struct {
 	Matches   []string            `json:"matches"`
 	Formats   []string            `json:"formats"`
 	Renders   []rendered          `json:"renders"`
+	Problems  []string            `json:"problems"`
 }
 
 type declared struct {
@@ -157,16 +194,28 @@ func byteOffset(text string, pos int) int {
 	return len(text)
 }
 
-func build(d diagnostic, files []*tsast.SourceFile) *tsast.Diagnostic {
-	m := keyToMessage(diagnostics.Key(d.Key))
-	if m == nil {
-		panic("unknown key " + d.Key)
+// The span map of the tuples a content mapper sends, whose offsets are
+// UTF-16 offsets into the virtual and the original text.
+func spanMap(mappings json.RawMessage, virtual string, original string) *spanmap.SpanMap {
+	decoded, err := spanmap.Unmarshal(mappings)
+	if err != nil {
+		panic(err)
 	}
+	segments := decoded.Segments()
+	for i := range segments {
+		s := &segments[i]
+		s.VirtualStart = core.TextPos(byteOffset(virtual, int(s.VirtualStart)))
+		s.VirtualEnd = core.TextPos(byteOffset(virtual, int(s.VirtualEnd)))
+		s.OriginalStart = core.TextPos(byteOffset(original, int(s.OriginalStart)))
+		s.OriginalEnd = core.TextPos(byteOffset(original, int(s.OriginalEnd)))
+	}
+	return spanmap.New(segments)
+}
+
+func build(d diagnostic, files []*tsast.SourceFile) *tsast.Diagnostic {
 	var f *tsast.SourceFile
-	pos, end := d.Pos, d.End
 	if d.File >= 0 {
 		f = files[d.File]
-		pos, end = byteOffset(f.Text(), pos), byteOffset(f.Text(), end)
 	}
 	var chain, related []*tsast.Diagnostic
 	for _, c := range d.Chain {
@@ -174,6 +223,21 @@ func build(d diagnostic, files []*tsast.SourceFile) *tsast.Diagnostic {
 	}
 	for _, r := range d.Related {
 		related = append(related, build(r, files))
+	}
+	pos, end := d.Pos, d.End
+	if d.Source != "" {
+		// A content mapper's diagnostic, at a range of the original text.
+		if f != nil {
+			pos, end = byteOffset(f.OriginalText(), pos), byteOffset(f.OriginalText(), end)
+		}
+		return tsast.NewExternalDiagnostic(f, core.NewTextRange(pos, end), d.Source, diagnostics.CategoryError, d.Code, d.Text).SetMessageChain(chain).SetRelatedInfo(related)
+	}
+	m := keyToMessage(diagnostics.Key(d.Key))
+	if m == nil {
+		panic("unknown key " + d.Key)
+	}
+	if f != nil {
+		pos, end = byteOffset(f.Text(), pos), byteOffset(f.Text(), end)
 	}
 	args := d.Args
 	if args == nil {
@@ -201,7 +265,7 @@ func main() {
 		panic(err)
 	}
 	messages := readMessages()
-	res := response{Localized: map[string][]string{}, Matches: []string{}, Formats: []string{}, Renders: []rendered{}}
+	res := response{Localized: map[string][]string{}, Matches: []string{}, Formats: []string{}, Renders: []rendered{}, Problems: []string{}}
 	for _, d := range messages {
 		m := d.message
 		flags := int(m.Category())
@@ -235,7 +299,18 @@ func main() {
 	for _, r := range req.Renders {
 		var files []*tsast.SourceFile
 		for _, f := range r.Files {
-			files = append(files, tsparser.ParseSourceFile(tsast.SourceFileParseOptions{FileName: tspath.RootedFilePath(f.Name), PathKey: tspath.PathKey(f.Name)}, f.Text, core.ScriptKindTS))
+			parsed := tsparser.ParseSourceFile(tsast.SourceFileParseOptions{FileName: tspath.RootedFilePath(f.Name), PathKey: tspath.PathKey(f.Name)}, f.Text, core.ScriptKindTS)
+			if m := f.Mapped; m != nil {
+				info := tsast.ContentMapperSourceFileInfo{ContentMapper: m.Mapper, OriginalText: m.Original}
+				if m.Mappings != nil {
+					info.SpanMap = spanMap(m.Mappings, f.Text, m.Original)
+				}
+				if m.Canonical != nil {
+					info.CanonicalSourceFile = files[*m.Canonical]
+				}
+				parsed.SetContentMapperInfo(info)
+			}
+			files = append(files, parsed)
 		}
 		var diags []*tsast.Diagnostic
 		for _, d := range r.Diagnostics {
@@ -265,13 +340,37 @@ func main() {
 			return b.String()
 		})
 		for _, d := range wrapped {
-			out.Flattened = append(out.Flattened, diagnosticwriter.FlattenDiagnosticMessage(d, r.NewLine, opts.Locale))
-			var plain, color strings.Builder
-			diagnosticwriter.FormatDiagnosticsStatusAndTime(&plain, "12:34:56 PM", d, opts)
-			diagnosticwriter.FormatDiagnosticsStatusWithColorAndTime(&color, "12:34:56 PM", d, opts)
-			out.Status = append(out.Status, plain.String(), color.String())
+			out.Flattened = append(out.Flattened, safely(func() string {
+				return diagnosticwriter.FlattenDiagnosticMessage(d, r.NewLine, opts.Locale)
+			}))
+			out.Status = append(out.Status, safely(func() string {
+				var plain strings.Builder
+				diagnosticwriter.FormatDiagnosticsStatusAndTime(&plain, "12:34:56 PM", d, opts)
+				return plain.String()
+			}), safely(func() string {
+				var color strings.Builder
+				diagnosticwriter.FormatDiagnosticsStatusWithColorAndTime(&color, "12:34:56 PM", d, opts)
+				return color.String()
+			}))
+		}
+		// The diagnostics in the order they are reported in, and whether each is the same as the one before.
+		out.Order, out.Equal = make([]int, len(diags)), []bool{}
+		for i := range out.Order {
+			out.Order[i] = i
+		}
+		slices.SortStableFunc(out.Order, func(a, b int) int { return tsast.CompareDiagnostics(diags[a], diags[b]) })
+		for i := 1; i < len(out.Order); i++ {
+			out.Equal = append(out.Equal, tsast.EqualDiagnostics(diags[out.Order[i-1]], diags[out.Order[i]]))
 		}
 		res.Renders = append(res.Renders, out)
+	}
+	for _, p := range req.Problems {
+		text := ""
+		if invalid := spanMap(p.Mappings, p.Virtual, p.Original).Validate(p.Virtual, p.Original); invalid != nil {
+			d := contentMapperMappingDiagnostic(nil, p.Label, invalid)
+			text = fmt.Sprintf("TS%d: %s", d.Code(), d.Localize(locale.Default))
+		}
+		res.Problems = append(res.Problems, text)
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetEscapeHTML(false)

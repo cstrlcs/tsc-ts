@@ -1,12 +1,17 @@
 /**
  * Diagnostics: message lookup and localization, the `Diagnostic` type, and tsc's plain and
  * pretty diagnostic output.
+ *
+ * A diagnostic in a file a content mapper produced is shown where its range maps to in the original
+ * text (`resolveDiagnosticLocation`), and a mapper's own diagnostic carries its text and the prefix
+ * of its code (`createExternalDiagnostic`).
  */
 import { isDigit, isUnicodeWhiteSpace, utf8Length } from './character-codes.js';
 import { Locale, translations } from './diagnostic-locales.js';
 import { Diagnostics, messageCodes, messageFlags, messageKeys, messageTexts } from './diagnostic-messages.js';
 import { getPathComponentsRelativeTo, getPathFromPathComponents, isRootedDiskPath, pathIsAbsolute } from './path.js';
 import { computeLineOfPosition, computeLineStarts } from './scanner.js';
+import { type MappingError, MappingErrorKind, type SpanMap, SpanMapFidelity } from './span-map.js';
 
 export { Diagnostics, Locale };
 export { parseLocale } from './locale.js';
@@ -20,6 +25,13 @@ export const enum DiagnosticCategory {
 
 /** A diagnostic message template, e.g. `Diagnostics.X_0_expected` for `'{0}' expected.`. */
 export type DiagnosticMessage = Diagnostics;
+
+/**
+ * The `message` of a diagnostic that has none: one an external source reported with a text of its
+ * own (`createExternalDiagnostic`). It has no code, key or text to look up. The checker's
+ * `cannotFindNameAtLocation` is -1.
+ */
+export const noMessage = -2 as DiagnosticMessage;
 
 const reportsUnnecessaryFlag = 4;
 const elidedInCompatibilityPyramidFlag = 8;
@@ -177,27 +189,77 @@ function threadCopyOf(file: DiagnosticFile): DiagnosticFile | undefined {
 /** The empty value of a file's position tables until they are computed. */
 const noNumbers: readonly number[] = [];
 
+/** What diagnostics need to know of a file whose text a content mapper produced from another text. */
+export class MappedFileInfo {
+  constructor(
+    /** The identity of the content mapper, which the note on a diagnostic in synthesized text names. */
+    readonly contentMapper: string,
+    /** The text the mapper transformed, which the file has on disk. */
+    readonly originalText: string,
+    /**
+     * How the file's text corresponds to `originalText`; undefined for the empty file that stands for a
+     * transform that failed.
+     */
+    readonly spanMap: SpanMap | undefined,
+    /** For a supplemental file, the name of its canonical file, which diagnostics show; `''` otherwise. */
+    readonly canonicalFileName: string,
+  ) {}
+}
+
 /** The text of a file diagnostics point into. */
 export class DiagnosticFile {
   readonly fileName: string;
   readonly text: string;
+  /** How a content mapper produced `text`; undefined for any other file. */
+  readonly mapped: MappedFileInfo | undefined;
+  /** For a mapped file, its original text under the name diagnostics show. */
+  private readonly originalFile: DiagnosticFile | undefined;
+  /** For a supplemental file, its text under the name of its canonical file. */
+  private readonly canonicalFile: DiagnosticFile | undefined;
   // Computed on first use; never empty once computed.
   private lineStarts: readonly number[] = noNumbers;
   /** Whether this is a thread's copy of a possibly shared file (`threadCopyOf`). */
   isThreadCopy = false;
 
-  constructor(fileName: string, text: string) {
+  constructor(fileName: string, text: string, mapped: MappedFileInfo | undefined = undefined) {
     this.fileName = fileName;
     this.text = text;
+    this.mapped = mapped;
+    const supplemental = mapped !== undefined && mapped.canonicalFileName !== '';
+    // As tsgo's OriginalText, which is the text itself for a mapper without an identity.
+    this.originalFile =
+      mapped !== undefined
+        ? new DiagnosticFile(
+            supplemental ? mapped.canonicalFileName : fileName,
+            mapped.contentMapper !== '' ? mapped.originalText : text,
+          )
+        : undefined;
+    this.canonicalFile = supplemental ? new DiagnosticFile(mapped.canonicalFileName, text) : undefined;
   }
 
   /**
-   * Computes the line starts, so that later reads never write to the file. The UTF-8 offsets, which
-   * only incremental builds read (for the diagnostics they store), are computed on first use, in a
-   * thread's copy where the file may be shared (`useThreadTextCaches`).
+   * The file a range of the original text is shown in: for a mapped file its original text, under the
+   * canonical file's name for a supplemental file. Any other file is its own original.
+   */
+  originalTextFile(): DiagnosticFile {
+    return this.originalFile ?? this;
+  }
+
+  /** The file a range of `text` is shown in: `text` under the canonical file's name for a supplemental file. */
+  virtualTextFile(): DiagnosticFile {
+    return this.canonicalFile ?? this;
+  }
+
+  /**
+   * Computes the line starts, also of the texts a mapped file is shown with, so that later reads never
+   * write to the file. The UTF-8 offsets, which only incremental builds read (for the diagnostics they
+   * store), are computed on first use, in a thread's copy where the file may be shared
+   * (`useThreadTextCaches`).
    */
   computeCaches(): void {
     if (this.lineStarts.length === 0) this.lineStarts = computeLineStarts(this.text);
+    if (this.originalFile !== undefined) this.originalFile.computeCaches();
+    if (this.canonicalFile !== undefined) this.canonicalFile.computeCaches();
   }
 
   /** Start offsets of each line, split at CR, LF, CRLF, LS and PS. */
@@ -339,8 +401,17 @@ export class Diagnostic {
   end: number;
   code: number;
   category: DiagnosticCategory;
+  /** The message template; `noMessage` for an external diagnostic, whose text is `messageText`. */
   readonly message: DiagnosticMessage;
   readonly args: readonly string[];
+  /**
+   * For a diagnostic of an external source such as a content mapper, the prefix shown before the code
+   * in place of `TS`; `''` otherwise. The range of an external diagnostic is in the original text of
+   * its file, before a content mapper transformed it.
+   */
+  source = '';
+  /** The message of an external diagnostic, which its source has already localized; `''` otherwise. */
+  messageText = '';
   messageChain: Diagnostic[] = [];
   relatedInformation: Diagnostic[] = [];
   readonly reportsUnnecessary: boolean;
@@ -363,16 +434,49 @@ export class Diagnostic {
     this.file = file;
     this.pos = pos;
     this.end = end;
-    this.code = messageCode(message);
-    this.category = messageCategory(message);
+    // An external diagnostic has no message to take them from: `createExternalDiagnostic` sets them.
+    const external = message === noMessage;
+    this.code = external ? 0 : messageCode(message);
+    this.category = external ? DiagnosticCategory.Error : messageCategory(message);
     this.message = message;
     this.args = args;
-    this.reportsUnnecessary = messageReportsUnnecessary(message);
-    this.reportsDeprecated = messageReportsDeprecated(message);
+    this.reportsUnnecessary = !external && messageReportsUnnecessary(message);
+    this.reportsDeprecated = !external && messageReportsDeprecated(message);
   }
 
+  /**
+   * The message in `locale`. An external diagnostic has its text as it is; one with an empty text, on
+   * which tsgo panics ("Unknown diagnostic message"), has an empty message.
+   */
   localize(locale: Locale): string {
-    return localizeMessage(locale, this.message, this.args);
+    if (this.message === noMessage) return this.messageText;
+    return localizeMessage(locale, this.message, this.displayMessageArgs());
+  }
+
+  /**
+   * The arguments as they are shown. Where a content mapper put a name of its own in the virtual text
+   * for one of the original (an alias segment of the span map), a diagnostic about that whole name
+   * shows the original name: an argument equal to the virtual name is replaced. `args` keeps the
+   * virtual name.
+   */
+  private displayMessageArgs(): readonly string[] {
+    const file = this.file;
+    if (file === undefined || file.mapped === undefined || this.source !== '') return this.args;
+    const spanMap = file.mapped.spanMap;
+    const segment = spanMap === undefined ? undefined : spanMap.aliasForVirtualSpan(this.pos, this.end);
+    const originalText = file.originalTextFile().text;
+    if (
+      segment === undefined ||
+      segment.virtualStart < 0 ||
+      segment.virtualEnd > file.text.length ||
+      segment.originalStart < 0 ||
+      segment.originalEnd > originalText.length
+    )
+      return this.args;
+    const virtualName = file.text.slice(segment.virtualStart, segment.virtualEnd);
+    if (!this.args.includes(virtualName)) return this.args;
+    const originalName = originalText.slice(segment.originalStart, segment.originalEnd);
+    return this.args.map((arg) => (arg === virtualName ? originalName : arg));
   }
 
   addMessageChain(chain: Diagnostic | undefined): Diagnostic {
@@ -389,6 +493,8 @@ export class Diagnostic {
     const result = new Diagnostic(this.file, this.pos, this.end, this.message, this.args);
     result.code = this.code;
     result.category = this.category;
+    result.source = this.source;
+    result.messageText = this.messageText;
     result.messageChain = this.messageChain;
     result.relatedInformation = this.relatedInformation;
     result.skippedOnNoEmit = this.skippedOnNoEmit;
@@ -424,6 +530,76 @@ export function createDiagnostic(
 /** A diagnostic without a file, such as an options error. */
 export function createCompilerDiagnostic(message: DiagnosticMessage, ...args: string[]): Diagnostic {
   return new Diagnostic(undefined, -1, -1, message, args);
+}
+
+/**
+ * A diagnostic an external source such as a content mapper reported. `messageText` is already
+ * localized, as the source owns its messages, and the code is shown after `source` (`vue1000`) in
+ * place of `TS`. The range is in the original text of `file`, before it was transformed.
+ */
+export function createExternalDiagnostic(
+  file: DiagnosticFile | undefined,
+  pos: number,
+  end: number,
+  source: string,
+  category: DiagnosticCategory,
+  code: number,
+  messageText: string,
+): Diagnostic {
+  const result = new Diagnostic(file, pos, end, noMessage);
+  result.code = code;
+  result.category = category;
+  result.source = source;
+  result.messageText = messageText;
+  return result;
+}
+
+/**
+ * The diagnostic for the content mapper `label` that returned a span map which is not valid for a
+ * virtual text of its result and the original text, at the start of `file`. It names the offsets of
+ * `problem` so the mapper's author can find the mapping: UTF-8 offsets, which tsgo counts, of the
+ * UTF-16 offsets `problem` has in `virtualText`, the text of the output the map came with, and in
+ * `originalText`.
+ */
+export function contentMapperMappingDiagnostic(
+  file: DiagnosticFile | undefined,
+  label: string,
+  problem: MappingError,
+  virtualText: string,
+  originalText: string,
+): Diagnostic {
+  const virtualOffset = String(utf8Length(virtualText.slice(0, problem.virtualPos)));
+  const originalOffset = String(utf8Length(originalText.slice(0, problem.originalPos)));
+  const report = (message: DiagnosticMessage, ...offsets: string[]): Diagnostic =>
+    new Diagnostic(file, 0, 0, message, [label, ...offsets]);
+  switch (problem.kind) {
+    case MappingErrorKind.Overlap:
+      return report(
+        Diagnostics.The_content_mapper_0_produced_overlapping_or_out_of_order_position_mappings_near_virtual_offset_1,
+        virtualOffset,
+      );
+    case MappingErrorKind.OutOfBounds:
+      return report(
+        Diagnostics.The_content_mapper_0_produced_a_position_mapping_that_points_outside_the_original_content_original_offset_1,
+        originalOffset,
+      );
+    case MappingErrorKind.VerbatimMismatch:
+      return report(
+        Diagnostics.The_content_mapper_0_produced_a_verbatim_mapping_that_does_not_match_the_original_content_virtual_offset_1_original_offset_2,
+        virtualOffset,
+        originalOffset,
+      );
+    case MappingErrorKind.Kind:
+      return report(
+        Diagnostics.The_content_mapper_0_produced_a_position_mapping_with_an_invalid_kind_near_virtual_offset_1,
+        virtualOffset,
+      );
+    case MappingErrorKind.Feature:
+      return report(
+        Diagnostics.The_content_mapper_0_produced_invalid_mapping_features_near_original_offset_1,
+        originalOffset,
+      );
+  }
 }
 
 /** A diagnostic for `message` that elaborates with `chain`, taking its location and related information. */
@@ -485,6 +661,14 @@ function fileNameOf(d: Diagnostic): string {
   return d.file === undefined ? '' : d.file.fileName;
 }
 
+/**
+ * What tells apart two diagnostics with one code, as tsgo's getDiagnosticMessageIdentity does: the
+ * text of an external diagnostic, the key of the message of any other.
+ */
+function messageIdentity(d: Diagnostic): string {
+  return d.message === noMessage ? d.messageText : messageKey(d.message);
+}
+
 function compareChainSize(a: readonly Diagnostic[], b: readonly Diagnostic[]): number {
   if (a.length !== b.length) return b.length - a.length;
   for (let i = 0; i < a.length; i++) {
@@ -513,20 +697,38 @@ function compareRelatedInfo(a: readonly Diagnostic[], b: readonly Diagnostic[]):
   return 0;
 }
 
-/** The order tsc reports diagnostics in: by file, position, code, arguments, then elaboration. */
+/**
+ * The order tsc reports diagnostics in: by file, position, code, external source and text, arguments,
+ * then elaboration.
+ */
 export function compareDiagnostics(a: Diagnostic, b: Diagnostic): number {
   if (a === b) return 0;
   const c = compareCodePoints(fileNameOf(a), fileNameOf(b));
   return c !== 0 ? c : compareDiagnosticsInFile(a, b);
 }
 
+/** The UTF-8 offset of `pos` in the text the range of `d` is in: the original text for an external diagnostic. */
+function utf8OffsetOf(d: Diagnostic, pos: number): number {
+  const file = d.file;
+  if (file === undefined) return pos;
+  return (d.source !== '' ? file.originalTextFile() : file).toUtf8Offset(pos);
+}
+
 /** `compareDiagnostics` of two diagnostics whose files have the same name. */
 function compareDiagnosticsInFile(a: Diagnostic, b: Diagnostic): number {
-  let c = a.pos - b.pos;
+  // In a file a content mapper produced, the range of an external diagnostic is in the original text and
+  // the range of a compiler diagnostic in the virtual text. tsgo orders one against the other by their
+  // offsets all the same, which are UTF-8 offsets; within one text UTF-16 offsets give the same order.
+  const acrossTexts = (a.source === '') !== (b.source === '') && a.file !== undefined && a.file.mapped !== undefined;
+  let c = acrossTexts ? utf8OffsetOf(a, a.pos) - utf8OffsetOf(b, b.pos) : a.pos - b.pos;
   if (c !== 0) return c;
-  c = a.end - b.end;
+  c = acrossTexts ? utf8OffsetOf(a, a.end) - utf8OffsetOf(b, b.end) : a.end - b.end;
   if (c !== 0) return c;
   c = a.code - b.code;
+  if (c !== 0) return c;
+  c = compareCodePoints(a.source, b.source);
+  if (c !== 0) return c;
+  c = compareCodePoints(messageIdentity(a), messageIdentity(b));
   if (c !== 0) return c;
   c = compareArgs(a.args, b.args);
   if (c !== 0) return c;
@@ -610,6 +812,8 @@ export function equalDiagnosticsNoRelatedInfo(a: Diagnostic, b: Diagnostic): boo
     a.pos === b.pos &&
     a.end === b.end &&
     a.code === b.code &&
+    a.source === b.source &&
+    messageIdentity(a) === messageIdentity(b) &&
     equalArgs(a.args, b.args) &&
     equalChain(a.messageChain, b.messageChain)
   );
@@ -656,18 +860,88 @@ function relativeFileName(fileName: string, options: DiagnosticFormatOptions): s
   );
 }
 
+/** Where a diagnostic is shown when that is not its own range of its own file (`resolveDiagnosticLocation`). */
+export class DiagnosticLocation {
+  constructor(
+    /** The file whose name and text the diagnostic is shown with. */
+    readonly file: DiagnosticFile,
+    readonly pos: number,
+    readonly end: number,
+  ) {}
+}
+
+/**
+ * Where a diagnostic is shown and against which text, as tsgo's diagnostic writer resolves it; undefined
+ * when that is the diagnostic's own range of its own file, as for every diagnostic that is neither
+ * external nor in a file a content mapper produced.
+ *
+ * The range of an external diagnostic is already in the original text. The range of a compiler diagnostic
+ * in a mapped file maps to the original text through the span map. One entirely in synthesized text has
+ * no original location and stays where it is in the virtual text, as does one in the empty file of a
+ * failed transform; a supplemental file is then shown under the name of its canonical file.
+ */
+export function resolveDiagnosticLocation(diagnostic: Diagnostic): DiagnosticLocation | undefined {
+  const file = diagnostic.file;
+  if (file === undefined) return undefined;
+  if (diagnostic.source !== '') return new DiagnosticLocation(file.originalTextFile(), diagnostic.pos, diagnostic.end);
+  const mapped = file.mapped;
+  if (mapped === undefined) return undefined;
+  if (mapped.spanMap !== undefined) {
+    const span = mapped.spanMap.virtualToOriginalSpan(diagnostic.pos, diagnostic.end);
+    if (span.fidelity !== SpanMapFidelity.None)
+      return new DiagnosticLocation(file.originalTextFile(), span.pos, span.end);
+  }
+  const shown = file.virtualTextFile();
+  return shown === file ? undefined : new DiagnosticLocation(shown, diagnostic.pos, diagnostic.end);
+}
+
+/**
+ * For a compiler diagnostic that lies entirely in text a content mapper synthesized, which has no place in
+ * the original text, the line at `level` that says the location shown is in virtual code and names the
+ * mapper; `''` for any other diagnostic.
+ */
+function synthesizedTextNote(diagnostic: Diagnostic, newLine: string, locale: Locale, level: number): string {
+  const file = diagnostic.file;
+  if (file === undefined || file.mapped === undefined || diagnostic.source !== '') return '';
+  const mapped = file.mapped;
+  if (
+    mapped.spanMap === undefined ||
+    mapped.spanMap.virtualToOriginalSpan(diagnostic.pos, diagnostic.end).fidelity !== SpanMapFidelity.None
+  )
+    return '';
+  const note = localizeMessage(
+    locale,
+    Diagnostics.This_location_is_in_virtual_code_produced_by_the_content_mapper_0_and_has_no_corresponding_location_in_the_original_file,
+    [mapped.contentMapper],
+  );
+  return newLine + '  '.repeat(level) + note;
+}
+
 function flattenChain(chain: readonly Diagnostic[], newLine: string, locale: Locale, level: number): string {
   let result = '';
   for (const entry of chain) {
     result += newLine + '  '.repeat(level) + entry.localize(locale);
     result += flattenChain(entry.messageChain, newLine, locale, level + 1);
+    result += synthesizedTextNote(entry, newLine, locale, level + 1);
   }
   return result;
 }
 
-/** The message followed by its chain, each level indented by two more spaces. */
+/**
+ * The message followed by its chain, each level indented by two more spaces. A diagnostic in text a
+ * content mapper synthesized, and each entry of the chain that is, ends its chain with a note saying so.
+ */
 export function flattenDiagnosticMessage(diagnostic: Diagnostic, newLine: string, locale: Locale): string {
-  return diagnostic.localize(locale) + flattenChain(diagnostic.messageChain, newLine, locale, 1);
+  return (
+    diagnostic.localize(locale) +
+    flattenChain(diagnostic.messageChain, newLine, locale, 1) +
+    synthesizedTextNote(diagnostic, newLine, locale, 1)
+  );
+}
+
+/** What precedes the code of a diagnostic: `TS`, or the source of an external diagnostic. */
+function diagnosticPrefix(diagnostic: Diagnostic): string {
+  return diagnostic.source !== '' ? diagnostic.source : 'TS';
 }
 
 /** `file(line,col): error TS1005: message`, as tsc prints without `--pretty`. */
@@ -679,14 +953,21 @@ export function formatDiagnostic(diagnostic: Diagnostic, options: DiagnosticForm
 /** `formatDiagnostic` where `fileName` is the relative name of the diagnostic's file, if it has one. */
 function formatDiagnosticIn(diagnostic: Diagnostic, fileName: string, options: DiagnosticFormatOptions): string {
   let result = '';
-  const file = diagnostic.file;
+  let file = diagnostic.file;
   if (file !== undefined) {
+    let pos = diagnostic.pos;
+    const location = resolveDiagnosticLocation(diagnostic);
+    if (location !== undefined) {
+      file = location.file;
+      pos = location.pos;
+      fileName = relativeFileName(file.fileName, options);
+    }
     const lineStarts = file.getLineStarts();
-    const line = computeLineOfPosition(lineStarts, diagnostic.pos);
-    const character = diagnostic.pos - lineStarts[line];
+    const line = computeLineOfPosition(lineStarts, pos);
+    const character = pos - lineStarts[line];
     result += `${fileName}(${line + 1},${character + 1}): `;
   }
-  result += `${categoryName(diagnostic.category)} TS${diagnostic.code}: `;
+  result += `${categoryName(diagnostic.category)} ${diagnosticPrefix(diagnostic)}${diagnostic.code}: `;
   return result + flattenDiagnosticMessage(diagnostic, options.newLine, options.locale) + options.newLine;
 }
 
@@ -804,26 +1085,32 @@ function codeSnippet(
   return result;
 }
 
+/** Where a diagnostic in `file` is shown: `resolveDiagnosticLocation`, or its own range of `file`. */
+function shownLocation(diagnostic: Diagnostic, file: DiagnosticFile): DiagnosticLocation {
+  return resolveDiagnosticLocation(diagnostic) ?? new DiagnosticLocation(file, diagnostic.pos, diagnostic.end);
+}
+
 /** The colored form with source snippets, as tsc prints with `--pretty`. */
 export function formatDiagnosticWithColorAndContext(diagnostic: Diagnostic, options: DiagnosticFormatOptions): string {
   const newLine = options.newLine;
   let result = '';
   const file = diagnostic.file;
-  if (file !== undefined) result += formatLocation(file, diagnostic.pos, options) + ' - ';
+  const shown = file !== undefined ? shownLocation(diagnostic, file) : undefined;
+  if (shown !== undefined) result += formatLocation(shown.file, shown.pos, options) + ' - ';
   const color = categoryColor(diagnostic.category);
   result += styled(categoryName(diagnostic.category), color);
-  result += `${grey} TS${diagnostic.code}: ${reset}`;
+  result += `${grey} ${diagnosticPrefix(diagnostic)}${diagnostic.code}: ${reset}`;
   result += flattenDiagnosticMessage(diagnostic, newLine, options.locale);
-  if (file !== undefined && diagnostic.code !== messageCode(Diagnostics.File_appears_to_be_binary)) {
-    result +=
-      newLine + codeSnippet(file, diagnostic.pos, diagnostic.end - diagnostic.pos, color, '', options) + newLine;
+  if (shown !== undefined && diagnostic.code !== messageCode(Diagnostics.File_appears_to_be_binary)) {
+    result += newLine + codeSnippet(shown.file, shown.pos, shown.end - shown.pos, color, '', options) + newLine;
   }
   for (const related of diagnostic.relatedInformation) {
     const relatedFile = related.file;
     if (relatedFile !== undefined) {
-      result += newLine + '  ' + formatLocation(relatedFile, related.pos, options) + ' - ';
+      const at = shownLocation(related, relatedFile);
+      result += newLine + '  ' + formatLocation(at.file, at.pos, options) + ' - ';
       result += flattenDiagnosticMessage(related, newLine, options.locale);
-      result += codeSnippet(relatedFile, related.pos, related.end - related.pos, cyan, '    ', options);
+      result += codeSnippet(at.file, at.pos, at.end - at.pos, cyan, '    ', options);
     }
     result += newLine;
   }
@@ -858,16 +1145,19 @@ export function formatDiagnosticStatusWithColor(
 
 class FileErrors {
   readonly file: DiagnosticFile;
+  /** Where the first error is shown in `file`. */
+  readonly pos: number;
   readonly errors: Diagnostic[] = [];
 
-  constructor(file: DiagnosticFile) {
+  constructor(file: DiagnosticFile, pos: number) {
     this.file = file;
+    this.pos = pos;
   }
 }
 
 function prettyPathForFileError(entry: FileErrors | undefined, options: DiagnosticFormatOptions): string {
   if (entry === undefined || entry.errors.length === 0) return '';
-  const line = computeLineOfPosition(entry.file.getLineStarts(), entry.errors[0].pos);
+  const line = computeLineOfPosition(entry.file.getLineStarts(), entry.pos);
   let fileName = entry.file.fileName;
   if (pathIsAbsolute(fileName) && pathIsAbsolute(options.currentDirectory)) {
     fileName = relativeFileName(fileName, options);
@@ -878,6 +1168,11 @@ function prettyPathForFileError(entry: FileErrors | undefined, options: Diagnost
 /**
  * The summary tsc prints after diagnostics with `--pretty`, e.g. "Found 2 errors in 2 files."
  * followed by a table of files; empty when there are no errors.
+ *
+ * An error shown somewhere other than its own range of its own file (`resolveDiagnosticLocation`) counts
+ * as a file of its own, as in tsgo, whose writer makes a new file for each such diagnostic: two errors
+ * that map into the original text of one file are "2 errors in 2 files", and the table has a row for
+ * each. Rows of one name are in the order of the diagnostics here, and in no fixed order in tsgo.
  */
 export function formatErrorSummary(diagnostics: readonly Diagnostic[], options: DiagnosticFormatOptions): string {
   const locale = options.locale;
@@ -885,6 +1180,7 @@ export function formatErrorSummary(diagnostics: readonly Diagnostic[], options: 
   let totalErrorCount = 0;
   let globalErrorCount = 0;
   const byFile = new Map<DiagnosticFile, FileErrors>();
+  const entries: FileErrors[] = [];
   for (const diagnostic of diagnostics) {
     if (diagnostic.category !== DiagnosticCategory.Error) continue;
     totalErrorCount++;
@@ -893,16 +1189,18 @@ export function formatErrorSummary(diagnostics: readonly Diagnostic[], options: 
       globalErrorCount++;
       continue;
     }
-    let entry = byFile.get(file);
+    const location = resolveDiagnosticLocation(diagnostic);
+    let entry = location === undefined ? byFile.get(file) : new FileErrors(location.file, location.pos);
     if (entry === undefined) {
-      entry = new FileErrors(file);
+      entry = new FileErrors(file, diagnostic.pos);
       byFile.set(file, entry);
     }
+    if (entry.errors.length === 0) entries.push(entry);
     entry.errors.push(diagnostic);
   }
   if (totalErrorCount === 0) return '';
 
-  const sorted = [...byFile.values()].sort((a, b) => compareCodePoints(a.file.fileName, b.file.fileName));
+  const sorted = entries.sort((a, b) => compareCodePoints(a.file.fileName, b.file.fileName));
   const firstFileName = prettyPathForFileError(sorted.length > 0 ? sorted[0]! : undefined, options);
   const fileCount = sorted.length;
   let message: string;

@@ -44,6 +44,7 @@ const {
 const {
   compareDiagnostics,
   createDiagnostic,
+  createExternalDiagnostic,
   DiagnosticFile,
   formatDiagnostic,
   formatDiagnostics,
@@ -399,6 +400,8 @@ const described = (d) => ({
   code: d.code,
   category: d.category,
   message: d.message,
+  source: d.source,
+  text: d.messageText,
   args: [...d.args],
   skipped: d.skippedOnNoEmit,
   chain: d.messageChain.map(described),
@@ -469,6 +472,30 @@ test('a packed checker result carries the reported text of each diagnostic in th
   } finally {
     formattedReports.format = undefined;
   }
+});
+
+test('a packed checker result carries the source and the text of an external diagnostic', () => {
+  const c = erroneous();
+  const plan = planSchedule(c, 1);
+  const result = checkFromQueue(c, 0, new Int32Array(scheduleOf(plan, 1)), plan.order, 0);
+  // A content mapper's diagnostic among the checker's, with another as related information.
+  const list = result.diagnostics.find((diagnostics) => diagnostics.length > 0);
+  // DiagnosticCategory.Error, a const enum member.
+  const error = 1;
+  const external = createExternalDiagnostic(list[0].file, 1, 3, 'box', error, 1000, 'Unclosed interpolation.');
+  external.addRelatedInfo(createExternalDiagnostic(undefined, -1, -1, 'vue', error, 7, ''));
+  list.push(external);
+  const back = unpackResult(structuredClone(packResult(result, c.program)), c.program, new Map());
+  assert.deepEqual(
+    back.diagnostics.map((diagnostics) => diagnostics.map(described)),
+    result.diagnostics.map((diagnostics) => diagnostics.map(described)),
+  );
+  const copy = back.diagnostics.flat().find((d) => d.source === 'box');
+  assert.equal(copy.messageText, 'Unclosed interpolation.');
+  assert.equal(copy.code, 1000);
+  assert.equal(copy.relatedInformation[0].source, 'vue');
+  assert.equal(copy.file, list[0].file);
+  assert.deepEqual(described(external.clone()), described(external));
 });
 
 test('sorted diagnostics are in the order of compareDiagnostics, equal ones as they came', () => {

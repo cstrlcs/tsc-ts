@@ -7,7 +7,8 @@ import { pathToFileURL } from 'node:url';
 import { compileSources } from './temp.mjs';
 
 // Compares messages, translations, locale matching, formatting and diagnostic output with tsgo's
-// (packages/tsgo/dist/diag-oracle, built by `npm run build:oracle`).
+// (packages/tsgo/dist/diag-oracle, built by `npm run build:oracle`), also for diagnostics in files a
+// content mapper produced and for a mapper's own diagnostics.
 const root = resolve(import.meta.dirname, '..');
 const repo = resolve(root, '../..');
 const oracle = join(repo, 'packages/tsgo/dist/diag-oracle');
@@ -283,4 +284,351 @@ test('diagnostic output matches tsgo', { skip }, async () => {
     );
   }
   console.log(`${renders.length} renders`);
+});
+
+/** The range of `part` in `text`. */
+function range(text, part) {
+  const pos = text.indexOf(part);
+  assert.ok(pos >= 0, part);
+  return [pos, pos + part.length];
+}
+
+/** A diagnostic a content mapper reported, at a range of the original text of its file. */
+function external(file, pos, end, source, code, text, related = [], chain = []) {
+  return { file, pos, end, key: '', args: [], chain, related, source, code, text };
+}
+
+// A file a content mapper produced from `boxOriginal`. The tuples are what the mapper sends for the parts of
+// the virtual text that come from the original: [virtualStart, virtualLength, originalStart, originalLength,
+// kind], with the features as an optional sixth value, in UTF-16 offsets.
+const boxOriginal = '<box title="café 😀">\n  {{ count + total }}\n\t(+ 1 2) {{ naïve }}\n</box>\n';
+const boxVirtual =
+  '// café 😀\nexport const a = count + total;\nexport const b = plus(1, 2);\nexport const c = __atom("naïve");\n';
+const boxSupplemental = 'declare const total: number;\n';
+const badOriginal = '<box>\n  {{ oops\n';
+const configText = '{\n  "contentMappers": [{ "package": "box-mapper", "strict": 1 }]\n}\n';
+const [Verbatim, Atom, Alias] = [0, 1, 2];
+const inVirtual = (part) => range(boxVirtual, part);
+const inOriginal = (part) => range(boxOriginal, part);
+const mapper = 'box-mapper 1.0.0';
+
+const mappedSources = [
+  {
+    name: '/project/src/app.box',
+    text: boxVirtual,
+    mapped: {
+      mapper,
+      original: boxOriginal,
+      mappings: [
+        [inVirtual('count + total')[0], 13, inOriginal('count + total')[0], 13, Verbatim],
+        // The mapper named the original's `+` `plus`.
+        [inVirtual('plus')[0], 4, inOriginal('(+ 1')[0] + 1, 1, Alias],
+        [inVirtual('__atom("naïve")')[0], 15, inOriginal('{{ naïve }}')[0], 11, Atom, 1],
+      ],
+    },
+  },
+  // A supplemental file of app.box, which diagnostics show under the name of app.box.
+  {
+    name: '/project/src/app.box.0.ts',
+    text: boxSupplemental,
+    mapped: {
+      mapper,
+      original: boxOriginal,
+      mappings: [[range(boxSupplemental, 'total')[0], 5, inOriginal('total')[0], 5, Verbatim]],
+      canonical: 0,
+    },
+  },
+  { name: '/project/src/a.ts', text: 'import "./app.box";\n' },
+  // The empty file of a transform that failed, which has no span map.
+  { name: '/project/src/bad.box', text: '', mapped: { mapper, original: badOriginal } },
+  // A file with an empty span map: all of it is synthesized.
+  {
+    name: '/project/lib/all.box',
+    text: 'export {};\n',
+    mapped: { mapper: 'other', original: 'ünused\n', mappings: null },
+  },
+  { name: '/project/src/bad.box.0.ts', text: 'export {};\n', mapped: { mapper, original: badOriginal, canonical: 3 } },
+  { name: '/project/tsconfig.json', text: configText },
+  // A mapper without an identity: tsgo takes the text itself for the original text of its file.
+  {
+    name: '/project/lib/anonymous.box',
+    text: 'plus(1)\n// é\n',
+    mapped: { mapper: '', original: '(+ 1)\n', mappings: [[0, 4, 1, 1, Alias]] },
+  },
+];
+
+const mappedScenarios = [
+  // A range in a verbatim segment is shown in the original text, as are those of its related information.
+  [
+    diag(
+      0,
+      ...inVirtual('total'),
+      'Cannot_find_name_0_2304',
+      ['total'],
+      [],
+      [
+        diag(0, ...inVirtual('export const b'), 'Did_you_mean_0_1369', ['x']),
+        diag(2, 7, 18, '_0_is_declared_here_2728', ['app']),
+        diag(1, ...range(boxSupplemental, 'total'), '_0_is_declared_here_2728', ['total']),
+        diag(-1, -1, -1, 'Did_you_mean_0_1369', ['y']),
+        external(0, ...inOriginal('title'), 'box', 12, 'Declared here.'),
+      ],
+    ),
+  ],
+  // A range in synthesized text is shown in the virtual text with a note, which each elaboration that is in
+  // synthesized text has too.
+  [
+    diag(
+      0,
+      ...inVirtual('export const a'),
+      'Type_0_is_not_assignable_to_type_1_2322',
+      ['string', 'number'],
+      [
+        diag(
+          0,
+          ...inVirtual('export const a'),
+          'Type_0_is_not_assignable_to_type_1_2322',
+          ['"one"', 'number'],
+          [
+            diag(-1, 0, 0, 'Property_0_is_missing_in_type_1_but_required_in_type_2_2741', ['p', 'A', 'B']),
+            diag(0, ...inVirtual('// café'), 'The_types_of_0_are_incompatible_between_these_types_2200', ['y']),
+          ],
+        ),
+        diag(0, ...inVirtual('count'), 'The_types_of_0_are_incompatible_between_these_types_2200', ['x']),
+        diag(2, 0, 6, 'The_types_of_0_are_incompatible_between_these_types_2200', ['z']),
+      ],
+    ),
+  ],
+  // A diagnostic about a whole alias shows the original name for the virtual one, also in an elaboration.
+  [
+    diag(0, ...inVirtual('plus'), 'Cannot_find_name_0_Did_you_mean_1_2552', ['plus', 'plus']),
+    diag(0, ...inVirtual('plus'), 'Cannot_find_name_0_Did_you_mean_1_2552', ['plus2', 'plus']),
+    diag(0, ...inVirtual('plus'), 'Cannot_find_name_0_2304', ['Plus']),
+    diag(0, ...inVirtual('lus'), 'Cannot_find_name_0_2304', ['plus']),
+    diag(
+      0,
+      ...inVirtual('plus(1, 2)'),
+      'Type_0_is_not_assignable_to_type_1_2322',
+      ['plus', 'number'],
+      [diag(0, ...inVirtual('plus'), 'Cannot_find_name_0_2304', ['plus'])],
+      [diag(0, ...inVirtual('plus'), '_0_is_declared_here_2728', ['plus'])],
+    ),
+  ],
+  // Ranges in an atom, across segments, from synthesized text into a segment, an empty one in synthesized
+  // text, and over the whole file.
+  [
+    diag(0, ...inVirtual('naïve'), 'Cannot_find_name_0_2304', ['naïve']),
+    diag(0, inVirtual('total')[0], inVirtual('plus')[1], 'Unreachable_code_detected_7027'),
+    diag(0, inVirtual('export const b')[0], inVirtual('plus')[1], 'Unreachable_code_detected_7027'),
+    diag(0, inVirtual('total')[1], inVirtual('total')[1], 'Identifier_expected_1003'),
+    diag(0, 0, boxVirtual.length, 'Unused_label_7028'),
+  ],
+  // A mapper's diagnostics: in a mapped file, in a supplemental one, in the file of a failed transform, in a
+  // file no mapper produced, and without a file.
+  [
+    external(0, ...inOriginal('{{ naïve }}'), 'box', 1000, 'Unclosed interpolation.', [
+      diag(0, ...inVirtual('naïve'), 'Did_you_mean_0_1369', ['}}']),
+    ]),
+    external(
+      0,
+      0,
+      boxOriginal.length,
+      'box',
+      7,
+      'Not a box: é 😀.',
+      [],
+      [
+        diag(-1, 0, 0, 'Did_you_mean_0_1369', ['<box>']),
+        diag(0, ...inVirtual('export const a'), 'Did_you_mean_0_1369', ['a']),
+      ],
+    ),
+    external(1, ...inOriginal('title'), 'vue', 5, 'In a supplemental file.'),
+    external(3, ...range(badOriginal, 'oops'), 'box', 1001, 'Unexpected end of input.'),
+    external(6, ...range(configText, '"strict"'), 'box', 2000, "Unknown option 'strict'."),
+    external(-1, -1, -1, 'box', 3000, 'No file.'),
+  ],
+  // Supplemental files, the file of a failed transform and a wholly synthesized file.
+  [
+    diag(1, ...range(boxSupplemental, 'total'), 'Cannot_find_name_0_2304', ['total']),
+    diag(1, 0, 7, 'Cannot_find_name_0_2304', ['declare']),
+    diag(3, 0, 0, 'The_content_mapper_0_did_not_provide_the_required_position_mappings_18071', ['box-mapper']),
+    diag(5, 0, 6, 'Cannot_find_name_0_2304', ['export']),
+    diag(4, 0, 6, 'Cannot_find_name_0_2304', ['export']),
+  ],
+  // Several errors in one mapped file and in another file, for the summary.
+  [
+    diag(0, ...inVirtual('count'), 'Cannot_find_name_0_2304', ['count']),
+    diag(0, ...inVirtual('total'), 'Cannot_find_name_0_2304', ['total']),
+    diag(2, 0, 6, 'Cannot_find_name_0_2304', ['import']),
+    diag(0, ...inVirtual('export const a'), 'Cannot_find_name_0_2304', ['a']),
+    diag(0, ...inVirtual('export const b'), 'Cannot_find_name_0_2304', ['b']),
+    diag(2, 7, 18, 'Cannot_find_name_0_2304', ['app']),
+    external(0, ...inOriginal('title'), 'box', 1, 'One.'),
+  ],
+  // One error in a mapped file.
+  [diag(0, ...inVirtual('count'), 'Cannot_find_name_0_2304', ['count'])],
+  // The order of diagnostics with one range and code: by source, then text. And of a mapper's diagnostic
+  // against a compiler diagnostic: UTF-16 offset 12 of the original text is UTF-8 offset 12, before UTF-16
+  // offset 11 of the virtual text, which is UTF-8 offset 14.
+  [
+    diag(0, ...inVirtual('count'), 'Cannot_find_name_0_2304', ['count']),
+    external(0, ...inVirtual('count'), 'box', 2304, 'b'),
+    external(0, ...inVirtual('count'), 'box', 2304, 'a'),
+    external(0, ...inVirtual('count'), 'abc', 2304, 'a'),
+    external(0, ...inVirtual('count'), 'box', 2304, 'a'),
+    diag(0, ...inVirtual('count'), 'Cannot_find_name_0_2304', ['count']),
+    diag(0, 11, 17, 'Cannot_find_name_0_2304', ['export']),
+    external(0, 12, 13, 'box', 1, 'Before export.'),
+  ],
+  // Errors in synthesized text of one file, which the summary counts as one file.
+  [
+    diag(0, ...inVirtual('export const a'), 'Cannot_find_name_0_2304', ['a']),
+    diag(0, ...inVirtual('export const b'), 'Cannot_find_name_0_2304', ['b']),
+    diag(0, ...inVirtual('// café'), 'Unreachable_code_detected_7027'),
+  ],
+  // The file of a mapper without an identity.
+  [
+    diag(7, 0, 4, 'Cannot_find_name_0_2304', ['plus']),
+    diag(7, 4, 7, 'Cannot_find_name_0_2304', ['x']),
+    external(7, 8, 12, 'box', 1, 'In the text itself.'),
+  ],
+];
+
+const directories = [
+  ['/project', true],
+  ['/project/src', false],
+  ['/PROJECT/src', false],
+  ['', true],
+];
+
+/** A summary with the rows of each file name in order: tsgo lists the files of one name in no fixed order. */
+function orderedSummary(summary) {
+  const lines = summary.split('\n');
+  // A row is a count, the file name and, in grey, the line of its first error.
+  const name = (line) => (/^ *\d+ {2}/.test(line) ? line.replace(/^ *\d+ {2}/, '').split('\u001b[90m:')[0] : undefined);
+  for (let i = 0; i < lines.length;) {
+    let end = i + 1;
+    if (name(lines[i]) !== undefined) while (end < lines.length && name(lines[end]) === name(lines[i])) end++;
+    lines.splice(i, end - i, ...lines.slice(i, end).sort());
+    i = end;
+  }
+  return lines.join('\n');
+}
+
+test('diagnostics in content mapped files match tsgo', { skip }, async () => {
+  const tags = await localeTags();
+  const renders = [];
+  for (const locale of tags) {
+    for (const diagnostics of mappedScenarios) {
+      for (const [currentDirectory, useCaseSensitiveFileNames] of directories) {
+        for (const newLine of ['\n', '\r\n']) {
+          const files = mappedSources;
+          renders.push({ locale, currentDirectory, useCaseSensitiveFileNames, newLine, files, diagnostics });
+        }
+      }
+    }
+  }
+  const { expected, actual } = run({ locales: [], matches: [], formats: [], renders }, 'mapped');
+  for (const field of ['plain', 'pretty', 'flattened', 'status', 'order', 'equal']) {
+    compareLists(
+      field,
+      expected.renders.map((r) => r[field]),
+      actual.renders.map((r) => r[field]),
+    );
+  }
+  compareLists(
+    'summary',
+    expected.renders.map((r) => orderedSummary(r.summary)),
+    actual.renders.map((r) => orderedSummary(r.summary)),
+  );
+  // What the cases are there for, in English from /project.
+  const english = (scenario) => expected.renders[scenario * directories.length * 2];
+  const note =
+    "  This location is in virtual code produced by the content mapper 'box-mapper 1.0.0' and has no " +
+    'corresponding location in the original file.';
+  assert.equal(
+    english(0).plain.split('\n')[0],
+    "src/app.box(2,14): error TS2304: Cannot find name 'total'.",
+    'a mapped range',
+  );
+  assert.deepEqual(
+    english(1)
+      .plain.split('\n')
+      .filter((line) => line.endsWith(note))
+      .map((line) => line.length - note.length),
+    [4, 2, 0],
+    'the note of each diagnostic of the chain that is in synthesized text',
+  );
+  assert.equal(english(2).flattened[0], "Cannot find name '+'. Did you mean '+'?", 'an alias');
+  assert.equal(english(4).plain.split('\n')[0], 'src/app.box(3,10): error box1000: Unclosed interpolation.');
+  assert.match(english(6).summary, /^\nFound 7 errors in 5 files\.\n/, 'mapped errors are files of their own');
+  assert.deepEqual(english(8).order, [7, 6, 0, 5, 3, 2, 4, 1]);
+  assert.deepEqual(english(8).equal, [false, false, true, false, false, true, false]);
+  assert.match(english(9).summary, /^\nFound 3 errors in the same file, starting at: src\/app\.box/);
+  console.log(`${renders.length} renders`);
+});
+
+test('an external diagnostic without a text has an empty message, where tsgo panics', { skip }, async () => {
+  const render = (text) => ({
+    locale: 'en',
+    currentDirectory: '/project',
+    useCaseSensitiveFileNames: true,
+    newLine: '\n',
+    files: mappedSources,
+    diagnostics: [external(0, ...inOriginal('title'), 'box', 1000, text)],
+  });
+  const request = { locales: [], matches: [], formats: [], renders: [render(''), render('MESSAGE')] };
+  const { expected, actual } = run(request, 'empty');
+  const [empty, texted] = expected.renders;
+  const panic = 'panic: Unknown diagnostic message: ';
+  assert.deepEqual([empty.plain, empty.pretty, ...empty.flattened, ...empty.status], Array(5).fill(panic));
+  for (const field of ['plain', 'pretty', 'flattened', 'status'])
+    assert.equal(
+      JSON.stringify(actual.renders[0][field]),
+      JSON.stringify(texted[field]).replaceAll('MESSAGE', ''),
+      field,
+    );
+  assert.equal(actual.renders[0].plain, 'src/app.box(1,6): error box1000: \n');
+});
+
+test('span map problems are reported with the offsets tsgo counts', { skip }, async () => {
+  const virtual = 'const é = "😀";\nexport const a = count;\n';
+  const original = '<é 😀>{{ count }}</é>\n';
+  const v = virtual.indexOf('count');
+  const o = original.indexOf('count');
+  const problem = (label, mappings, texts = [virtual, original]) => ({
+    label,
+    virtual: texts[0],
+    original: texts[1],
+    mappings,
+  });
+  const problems = [
+    problem('valid', [[v, 5, o, 5, Verbatim]]),
+    problem('empty', []),
+    // A segment that starts inside the one before it.
+    problem('overlap é', [
+      [v, 5, o, 5, Verbatim],
+      [v + 2, 1, o + 2, 1, Verbatim],
+    ]),
+    // An original range that ends before it starts.
+    problem('bounds', [[v, 5, o + 5, -2, Atom]]),
+    problem('mismatch', [[v, 5, o + 1, 5, Verbatim]]),
+    problem('length', [[v, 5, o, 4, Verbatim]]),
+    problem('kind', [[v, 5, o, 5, 9]]),
+    problem('feature', [[v, 5, o, 5, Alias, 1 << 20]]),
+    // In ASCII text the offsets are the same in UTF-8 and UTF-16.
+    problem('ascii', [[6, 1, 3, 2, Verbatim]], ['const a = 1;\n', 'a = 1\n']),
+  ];
+  const { expected, actual } = run({ locales: [], matches: [], formats: [], renders: [], problems }, 'problems');
+  assert.deepEqual(actual.problems, expected.problems);
+  assert.deepEqual(
+    expected.problems.map((text) => text.split(':')[0]),
+    ['', '', 'TS18081', 'TS18072', 'TS18073', 'TS18073', 'TS18083', 'TS18082', 'TS18073'],
+  );
+  // The offsets are UTF-8 offsets: three more than the UTF-16 offsets of `count` in both texts.
+  assert.equal(
+    expected.problems[4],
+    `TS18073: The content mapper 'mismatch' produced a verbatim mapping that does not match the original ` +
+      `content (virtual offset ${v + 3}, original offset ${o + 4}).`,
+  );
 });
