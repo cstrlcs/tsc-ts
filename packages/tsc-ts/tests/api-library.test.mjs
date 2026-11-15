@@ -1117,6 +1117,90 @@ test('the scanner, the comment ranges and skipTrivia give what TypeScript gives'
   assert.ok(compared > 50000, `${compared} answers compared`);
 });
 
+test('getChildren, getFirstToken and getLastToken give what TypeScript gives', { skip }, async () => {
+  const ts5 = (await import('typescript-5.9')).default;
+  const api = await load('library/index.js');
+  const { SyntaxKind } = api;
+  const names = namesOf(SyntaxKind);
+  const names5 = namesOf(ts5.SyntaxKind);
+  names5.set(ts5.SyntaxKind.EndOfFileToken, 'EndOfFile');
+  const isJSDoc = (node) => node.kind >= SyntaxKind.FirstJSDocNode && node.kind <= SyntaxKind.LastJSDocNode;
+  // Where TypeScript 7's trees differ from TypeScript 5's: a JSDoc comment starts where the token before it
+  // ends, not at its `/**`, and keeps its text as JSDocText nodes, so JSDoc nodes are compared by kind and end,
+  // without their children; and the types of an `implements` clause are type references.
+  const kindOf = (node) =>
+    node.kind === SyntaxKind.TypeReference && node.parent.kind === SyntaxKind.HeritageClause
+      ? 'ExpressionWithTypeArguments'
+      : names.get(node.kind);
+  const describe = (node) =>
+    node === undefined ? '-' : isJSDoc(node) ? `JSDoc ${node.end}` : `${kindOf(node)} ${node.pos} ${node.end}`;
+  const describe5 = (node) =>
+    node === undefined
+      ? '-'
+      : ts5.isJSDoc(node)
+        ? `JSDoc ${node.end}`
+        : `${names5.get(node.kind)} ${node.pos} ${node.end}`;
+  const failures = [];
+  let compared = 0;
+  const expect = (actual, expected, what) => {
+    if (actual !== expected) failures.push(`${what}: ${actual} != ${expected}`);
+  };
+  for (const name of [
+    'jsx.tsx',
+    'library/src/main.ts',
+    'library/src/types.ts',
+    'services/src/cjs.js',
+    'services/src/docs.ts',
+    'services/src/legacy.js',
+  ]) {
+    const fileName = join(root, 'tests/fixtures', name);
+    const text = readFileSync(fileName, 'utf8');
+    const file = api.parseSourceFile(fileName, text, { host: hostFor(root) });
+    const reference = ts5.createSourceFile(fileName, text, ts5.ScriptTarget.ESNext, true);
+    // TypeScript 5 reads the tokens of a node without the file's language variant, so the `</` of a JSX
+    // closing element, one token in TypeScript 7, is two there.
+    const children5 = (node) => {
+      const children = node.getChildren(reference);
+      if (node.kind !== ts5.SyntaxKind.JsxClosingElement) return children;
+      const [less, slash, ...rest] = children;
+      const kind = ts5.SyntaxKind.LessThanSlashToken;
+      return [{ kind, pos: less.pos, end: slash.end, parent: node, getChildren: () => [] }, ...rest];
+    };
+    // TypeScript 5 throws for the first or last token of a node without children.
+    const token5 = (node, method) => {
+      try {
+        return node[method](reference);
+      } catch {
+        return undefined;
+      }
+    };
+    const visit = (node, node5) => {
+      compared++;
+      const where = `${name} ${describe(node)}`;
+      const children = api.getChildren(node);
+      const expected = children5(node5);
+      assert.ok(api.getChildren(node, file) === children, `${where}: children made once`);
+      expect(children.map(describe).join(', '), expected.map(describe5).join(', '), `children of ${where}`);
+      if (children.length !== expected.length) return;
+      if (node.kind !== SyntaxKind.JsxClosingElement)
+        expect(describe(api.getFirstToken(node)), describe5(token5(node5, 'getFirstToken')), `first of ${where}`);
+      expect(describe(api.getLastToken(node)), describe5(token5(node5, 'getLastToken')), `last of ${where}`);
+      for (let i = 0; i < children.length; i++) {
+        expect(describe(children[i].parent), describe5(expected[i].parent), `parent of ${describe(children[i])}`);
+        if (!isJSDoc(children[i])) visit(children[i], expected[i]);
+      }
+    };
+    visit(file, reference);
+    // The first and last tokens are the nodes getChildren gives.
+    let first = file;
+    while (api.getChildren(first).length > 0) first = api.getChildren(first).find((child) => !isJSDoc(child));
+    assert.ok(api.getFirstToken(file) === first, `${name}: first token`);
+    assert.ok(api.getLastToken(file, file) === file.endOfFileToken, `${name}: last token`);
+  }
+  assert.deepEqual(failures.slice(0, 20), []);
+  assert.ok(compared > 2000, `${compared} nodes compared`);
+});
+
 test('a program takes a file parse threads prepared only when the host gives the same text', { skip }, async () => {
   const api = await load('library/index.js');
   const { parallelParse, PreparedFile } = await load('compiler/parallel-parse.js');

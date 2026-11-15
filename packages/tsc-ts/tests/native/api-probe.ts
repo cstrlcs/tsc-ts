@@ -1,7 +1,7 @@
-// Prints tsc-ts/api's answers for a project, one line each: its files and diagnostics, the symbol, types and
-// signatures at every node of its files outside the default libraries, the tokens and comments of their texts, and
-// the answers of the program with its last file updated and of a program that takes its files. The same answers are
-// expected from a Node build and a native build of this file.
+// Prints tsc-ts/api's answers for a project, one line each: its files and diagnostics, the symbol, types,
+// signatures and children at every node of its files outside the default libraries, the tokens and comments of
+// their texts, and the answers of the program with its last file updated and of a program that takes its files.
+// The same answers are expected from a Node build and a native build of this file.
 // Usage: api-probe <tsconfig.json> <default library directory>
 import {
   type CommentRange,
@@ -9,6 +9,9 @@ import {
   createScanner,
   type Diagnostic,
   type Expression,
+  getChildren,
+  getFirstToken,
+  getLastToken,
   getLeadingCommentRanges,
   getPreEmitDiagnostics,
   getSourceFileOfNode,
@@ -52,6 +55,15 @@ function nodeText(node: Node | undefined): string {
   return `${name}:${node.kind}:${node.pos}-${node.end}`;
 }
 
+/** The children of a node by kind and position, with the children of each list in brackets. */
+function childrenText(node: Node): string {
+  return getChildren(node)
+    .map((child) =>
+      child.kind === SyntaxKind.SyntaxList ? `[${childrenText(child)}]` : `${child.kind}:${child.pos}-${child.end}`,
+    )
+    .join(',');
+}
+
 function symbolText(symbol: Symbol | undefined): string {
   if (symbol === undefined) return '-';
   const declarations = symbol.declarations.map(nodeText).join(',');
@@ -92,6 +104,8 @@ function probe(program: Program, checker: TypeChecker): void {
       print(`  text ${JSON.stringify(getTextOfNode(node).substring(0, 60))} ${getSourceFileOfNode(node) === file}`);
       if (node.kind === SyntaxKind.StringLiteral || node.kind === SyntaxKind.NoSubstitutionTemplateLiteral)
         print(`  string ${JSON.stringify((node as StringLiteralLike).text)}`);
+      print(`  children ${childrenText(node)}`);
+      print(`  tokens ${nodeText(getFirstToken(node))} ${nodeText(getLastToken(node, file))}`);
       print(`  type ${keep(checker.getTypeAtLocation(node))}`);
       print(`  contextual ${keep(checker.getContextualType(node as Expression))}`);
       if (node.kind === SyntaxKind.CallExpression || node.kind === SyntaxKind.NewExpression) {
