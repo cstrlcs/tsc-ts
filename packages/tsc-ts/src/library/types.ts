@@ -362,6 +362,15 @@ export interface TypeChecker {
   getSignatureFromDeclaration(node: Node): Signature | undefined;
   getResolvedSignature(node: Node): Signature | undefined;
   getContextualType(node: Expression): Type | undefined;
+  /** The symbols a module exports, `export *` ones included, without `export=` and other reserved names. */
+  getExportsOfModule(symbol: Symbol): readonly Symbol[];
+  /** The symbol `symbol` is a member or an export of, with its declarations merged; undefined without one. */
+  getParentOfSymbol(symbol: Symbol): Symbol | undefined;
+  /**
+   * The symbol an export specifier exports: the member of the module it names, or what its name means where it
+   * is. An identifier gives what it means where it is; any other node throws an InternalCompilerError.
+   */
+  getExportSpecifierLocalTargetSymbol(node: Node): Symbol | undefined;
   getShorthandAssignmentValueSymbol(node: Node): Symbol | undefined;
   getTypeFromTypeNode(node: TypeNode): Type | undefined;
   getBaseTypeOfLiteralType(type: Type): Type | undefined;
@@ -389,4 +398,6 @@ export interface TypeChecker {
   getNumberType(): Type;
   getBigIntType(): Type;
   getBooleanType(): Type;
+  /** Whether `symbol` is the checker's unknown symbol, which getAliasedSymbol gives for an alias that doesn't resolve. */
+  isUnknownSymbol(symbol: Symbol): boolean;
 }

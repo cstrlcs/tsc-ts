@@ -1,5 +1,7 @@
 import { Base, Color, Derived, Flags, isPoint, overloaded, Shapes, type ElementOf, type Keys, type Loud, type Lookup, type Maybe, type Pair, type Picked, type Point, type Route } from './types.js';
 import * as types from './types.js';
+// @ts-expect-error The alias of a name the module doesn't export resolves to the unknown symbol.
+import { missing } from './types.js';
 
 export default function distance(this: void, a: Point, b: Point = Shapes.unit): number {
   return Math.hypot(a.x - b.x, (a.y ?? 0) - (b.y ?? 0));

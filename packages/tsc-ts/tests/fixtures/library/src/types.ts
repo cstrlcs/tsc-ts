@@ -60,3 +60,5 @@ export namespace Shapes {
     return { x: p.x * by, y: (p.y ?? 0) * by };
   }
 }
+
+export * from './units.js';

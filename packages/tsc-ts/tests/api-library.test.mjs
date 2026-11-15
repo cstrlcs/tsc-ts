@@ -290,6 +290,9 @@ test('symbols, types and signatures answer as tsc --api', { skip, timeout: 600_0
 
     const pairs = [];
     let nonAliasChecked = false;
+    let otherNodeChecked = false;
+    let unknownSymbols = 0;
+    let moduleExports = 0;
     const seen = new Set();
     const visitType = (lib, ref, what) => {
       if ((lib === undefined) !== (ref === null || ref === undefined)) {
@@ -347,6 +350,19 @@ test('symbols, types and signatures answer as tsc --api', { skip, timeout: 600_0
           describeTsgoSymbol(await tsgo.json('getShorthandAssignmentValueSymbol', { ...base, location })),
           `shorthand value symbol at ${location}`,
         );
+        if (node.kind === api.SyntaxKind.ExportSpecifier || node.kind === api.SyntaxKind.Identifier)
+          expect(
+            describeSymbol(checker.getExportSpecifierLocalTargetSymbol(node)),
+            describeTsgoSymbol(await tsgo.json('getExportSpecifierLocalTargetSymbol', { ...base, location })),
+            `export specifier target at ${location}`,
+          );
+        else if (!otherNodeChecked) {
+          // getExportSpecifierLocalTargetSymbol takes an export specifier or an identifier; tsgo panics on any other
+          // node, and the library throws.
+          otherNodeChecked = true;
+          assert.throws(() => checker.getExportSpecifierLocalTargetSymbol(node), api.InternalCompilerError);
+          await assert.rejects(tsgo.json('getExportSpecifierLocalTargetSymbol', { ...base, location }), /panic/);
+        }
         if (signatureDeclarationKinds.has(node.kind)) {
           const signature = checker.getSignatureFromDeclaration(node);
           const refSignature = await tsgo.json('getSignatureFromDeclaration', { ...base, location });
@@ -403,6 +419,7 @@ test('symbols, types and signatures answer as tsc --api', { skip, timeout: 600_0
       visitType(checker[`get${name}Type`](), await tsgo.json(`get${name}Type`, base), `${name} type`);
 
     // Symbols: their types, aliases, parents, members and exports.
+    const wellKnown = await tsgo.json('getWellKnownSymbols', base);
     for (const [symbol, ref, location] of symbols.slice(0, 600)) {
       visitType(
         checker.getTypeOfSymbol(symbol),
@@ -414,14 +431,20 @@ test('symbols, types and signatures answer as tsc --api', { skip, timeout: 600_0
         await tsgo.json('getDeclaredTypeOfSymbol', { ...base, symbol: ref.reference }),
         `declared type of symbol at ${location}`,
       );
+      expect(checker.isUnknownSymbol(symbol), ref.reference.id === wellKnown.unknown, `unknown symbol at ${location}`);
       // getAliasedSymbol takes an alias; tsgo panics on any other symbol, and the library throws.
-      if ((symbol.flags & api.SymbolFlags.Alias) !== 0)
+      if ((symbol.flags & api.SymbolFlags.Alias) !== 0) {
+        const aliased = checker.getAliasedSymbol(symbol);
+        const refAliased = await tsgo.json('getAliasedSymbol', { ...base, symbol: ref.reference });
+        expect(describeSymbol(aliased), describeTsgoSymbol(refAliased), `aliased symbol at ${location}`);
+        // An alias that doesn't resolve gives the unknown symbol.
         expect(
-          describeSymbol(checker.getAliasedSymbol(symbol)),
-          describeTsgoSymbol(await tsgo.json('getAliasedSymbol', { ...base, symbol: ref.reference })),
-          `aliased symbol at ${location}`,
+          checker.isUnknownSymbol(aliased),
+          refAliased.reference.id === wellKnown.unknown,
+          `unknown aliased symbol at ${location}`,
         );
-      else if (!nonAliasChecked) {
+        if (checker.isUnknownSymbol(aliased)) unknownSymbols++;
+      } else if (!nonAliasChecked) {
         nonAliasChecked = true;
         assert.throws(() => checker.getAliasedSymbol(symbol), api.InternalCompilerError);
         await assert.rejects(tsgo.json('getAliasedSymbol', { ...base, symbol: ref.reference }), /panic/);
@@ -433,6 +456,19 @@ test('symbols, types and signatures answer as tsc --api', { skip, timeout: 600_0
         ),
         `parent at ${location}`,
       );
+      expect(
+        describeSymbol(checker.getParentOfSymbol(symbol)),
+        describeTsgoSymbol(await tsgo.json('getParentOfSymbolForChecker', { ...base, symbol: ref.reference })),
+        `checker's parent at ${location}`,
+      );
+      const exported = checker.getExportsOfModule(symbol);
+      expect(
+        exported.map(describeSymbol),
+        ((await tsgo.json('getExportsOfModule', { ...base, symbol: ref.reference })) ?? []).map(describeTsgoSymbol),
+        `exports of module at ${location}`,
+      );
+      const names = exported.map(api.symbolName);
+      if (names.includes('Point') && names.includes('origin')) moduleExports++;
       expect(
         describeSymbol(symbol.getExportSymbol()),
         describeTsgoSymbol(
@@ -661,6 +697,8 @@ test('symbols, types and signatures answer as tsc --api', { skip, timeout: 600_0
       `${failures.length} differences in ${pairs.length} types and ${symbols.length} symbols`,
     );
     assert.ok(pairs.length > 200, `${pairs.length} types compared`);
+    assert.ok(unknownSymbols > 0, 'an alias that resolves to the unknown symbol');
+    assert.ok(moduleExports > 0, 'a module with exports of its own and of an `export *`');
   } finally {
     await tsgo.close();
   }
@@ -901,6 +939,7 @@ test(
     const main = join(dir, 'src/main.ts');
     const types = join(dir, 'src/types.ts');
     const docs = join(dir, 'src/docs.ts');
+    const units = join(dir, 'src/units.ts');
     const extra = join(dir, 'src/extra.ts');
     const mainText = readFileSync(main, 'utf8');
 
@@ -962,19 +1001,19 @@ test(
     // An edit to the body of a file: that file is parsed, the other files and the libraries are taken.
     const before = programAnswers(api, program, dir);
     write(main, mainText + "export const added: number = 'text';\n");
-    next({ [main]: false, [types]: true, [docs]: true });
+    next({ [main]: false, [types]: true, [docs]: true, [units]: true });
     assert.ok(program.getSemanticDiagnostics(program.getSourceFile(main)).some((d) => d.code === 2322));
     assert.deepEqual(programAnswers(api, steps[0], dir), before);
     // An edit that imports a new file, which changes the program's structure: the other files are still taken.
     write(extra, 'export const extra = 1;\n');
     write(main, "import { extra } from './extra.js';\n" + mainText + 'extra;\n');
-    next({ [main]: false, [types]: true, [docs]: true, [extra]: false });
+    next({ [main]: false, [types]: true, [docs]: true, [units]: true, [extra]: false });
     // An edit to a file that another imports: the importing file is taken, and checked against the new text.
     write(types, readFileSync(types, 'utf8').replace('readonly x: number;', 'readonly x: string;'));
-    next({ [main]: true, [types]: false, [docs]: true, [extra]: true });
+    next({ [main]: true, [types]: false, [docs]: true, [units]: true, [extra]: true });
     assert.ok(program.getSemanticDiagnostics(program.getSourceFile(main)).length > 0);
     // No edit: every file is taken.
-    next({ [main]: true, [types]: true, [docs]: true, [extra]: true });
+    next({ [main]: true, [types]: true, [docs]: true, [units]: true, [extra]: true });
 
     // The new program does not depend on the old ones, which are disposed of on their own.
     const answers = programAnswers(api, program, dir);
@@ -992,7 +1031,7 @@ test(
     const other = api.createProgram({ rootNames, options: detection, host: hostFor(dir), oldProgram: program });
     assert.deepEqual(
       taken(other, program, (file) => other.isSourceFileDefaultLibrary(file)),
-      { own: { [main]: false, [types]: false, [docs]: false, [extra]: false }, libraries: true },
+      { own: { [main]: false, [types]: false, [docs]: false, [units]: false, [extra]: false }, libraries: true },
     );
     const scratch = api.createProgram({ rootNames, options: detection, host: hostFor(dir) });
     assert.deepEqual(programAnswers(api, other, dir), programAnswers(api, scratch, dir));

@@ -139,6 +139,8 @@ function probe(program: Program, checker: TypeChecker): void {
       print(`  tokens ${nodeText(getFirstToken(node))} ${nodeText(getLastToken(node, file))}`);
       print(`  type ${keep(checker.getTypeAtLocation(node))}`);
       print(`  contextual ${keep(checker.getContextualType(node as Expression))}`);
+      if (node.kind === SyntaxKind.ExportSpecifier || node.kind === SyntaxKind.Identifier)
+        print(`  export target ${symbolText(checker.getExportSpecifierLocalTargetSymbol(node))}`);
       if (node.kind === SyntaxKind.CallExpression || node.kind === SyntaxKind.NewExpression) {
         const signature = checker.getResolvedSignature(node);
         print(`  resolved ${signature === undefined ? '-' : nodeText(signature.declaration)}`);
@@ -160,8 +162,12 @@ function probe(program: Program, checker: TypeChecker): void {
     print(`  declared ${keep(checker.getDeclaredTypeOfSymbol(symbol))}`);
     for (const tag of checker.getJsDocTagsOfSymbol(symbol))
       print(`  tag ${tag.name} ${JSON.stringify(tag.text ?? '')}`);
-    if ((symbol.flags & SymbolFlags.Alias) !== 0) print(`  aliased ${symbolText(checker.getAliasedSymbol(symbol))}`);
-    print(`  parent ${symbolText(symbol.getParent())}`);
+    if ((symbol.flags & SymbolFlags.Alias) !== 0) {
+      const aliased = checker.getAliasedSymbol(symbol);
+      print(`  aliased ${symbolText(aliased)} unknown ${checker.isUnknownSymbol(aliased)}`);
+    }
+    print(`  parent ${symbolText(symbol.getParent())} merged ${symbolText(checker.getParentOfSymbol(symbol))}`);
+    print(`  module exports ${checker.getExportsOfModule(symbol).map(symbolName).join(',')}`);
     print(`  members ${[...symbol.getMembers().keys()].sort().join(',')}`);
     print(`  exports ${[...symbol.getExports().keys()].sort().join(',')}`);
   }

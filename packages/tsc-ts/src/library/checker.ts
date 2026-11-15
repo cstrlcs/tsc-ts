@@ -15,6 +15,8 @@ import {
 } from '../compiler/checker-members.js';
 import {
   getConstantValue,
+  getExportsOfModuleAsArray,
+  getExportSpecifierLocalTargetSymbol,
   getShorthandAssignmentValueSymbol,
   getSymbolAtLocation,
   getTypeAtLocation,
@@ -25,8 +27,9 @@ import {
 } from '../compiler/checker-services.js';
 import { getReturnTypeOfSignature, getTypePredicateOfSignature } from '../compiler/checker-signatures.js';
 import { getTypeOfSymbol } from '../compiler/checker-symbol-types.js';
-import { resolveAlias, resolveName } from '../compiler/checker-symbols.js';
+import { getParentOfSymbol, resolveAlias, resolveName } from '../compiler/checker-symbols.js';
 import {
+  compareSymbols,
   getBaseTypeOfLiteralType,
   getTypeArguments,
   isArrayType,
@@ -239,6 +242,35 @@ export class LibraryTypeChecker implements TypeChecker {
     }
   }
 
+  /** The exports in the checker's order of symbols, as `tsc --api` answers them. */
+  getExportsOfModule(symbol: Symbol): readonly Symbol[] {
+    try {
+      const c = this.c;
+      return publicSymbols(
+        getExportsOfModuleAsArray(c, compilerSymbol(symbol)).sort((a, b) => compareSymbols(c, a, b)),
+      );
+    } catch (e) {
+      throw internalError(e);
+    }
+  }
+
+  /** The merged parent, which is the getParentOfSymbolForChecker request of `tsc --api`. */
+  getParentOfSymbol(symbol: Symbol): Symbol | undefined {
+    try {
+      return publicSymbol(getParentOfSymbol(this.c, compilerSymbol(symbol)));
+    } catch (e) {
+      throw internalError(e);
+    }
+  }
+
+  getExportSpecifierLocalTargetSymbol(location: Node): Symbol | undefined {
+    try {
+      return publicSymbol(getExportSpecifierLocalTargetSymbol(this.c, node(location)));
+    } catch (e) {
+      throw internalError(e);
+    }
+  }
+
   getShorthandAssignmentValueSymbol(location: Node): Symbol | undefined {
     try {
       return publicSymbol(getShorthandAssignmentValueSymbol(this.c, node(location)));
@@ -390,5 +422,9 @@ export class LibraryTypeChecker implements TypeChecker {
 
   getBooleanType(): Type {
     return this.c.booleanType as unknown as Type;
+  }
+
+  isUnknownSymbol(symbol: Symbol): boolean {
+    return compilerSymbol(symbol) === this.c.unknownSymbol;
   }
 }
