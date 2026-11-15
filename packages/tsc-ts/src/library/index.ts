@@ -10,6 +10,7 @@ export { symbolName } from './symbols.js';
 export { createProgram, createProgramFromConfigFile, getPreEmitDiagnostics, parseConfigFile } from './program.js';
 export { DisposedProgramError, InternalCompilerError } from './errors.js';
 export { parseSourceFile, type ParseSourceFileOptions } from './parse.js';
+export { getJSDocTags } from './jsdoc.js';
 export {
   type CommentKind,
   type CommentRange,

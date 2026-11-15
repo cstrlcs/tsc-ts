@@ -11,6 +11,7 @@ import {
   type Expression,
   getChildren,
   getFirstToken,
+  getJSDocTags,
   getLastToken,
   getLeadingCommentRanges,
   getPreEmitDiagnostics,
@@ -128,6 +129,8 @@ function probe(program: Program, checker: TypeChecker): void {
       print(
         `  guards ${isExpression(node)} ${isTypeNode(node)} ${isModifier(node)} ${isTokenKind(node.kind)} ${isAssignmentOperator(node.kind)}`,
       );
+      const tags = getJSDocTags(node);
+      if (tags.length > 0) print(`  tags ${tags.map((tag) => `${tag.tagName.text}:${tag.pos}`).join(',')}`);
       print(`  children ${childrenText(node)}`);
       print(`  tokens ${nodeText(getFirstToken(node))} ${nodeText(getLastToken(node, file))}`);
       print(`  type ${keep(checker.getTypeAtLocation(node))}`);

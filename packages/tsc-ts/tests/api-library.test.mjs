@@ -900,6 +900,7 @@ test(
     const config = join(dir, 'tsconfig.json');
     const main = join(dir, 'src/main.ts');
     const types = join(dir, 'src/types.ts');
+    const docs = join(dir, 'src/docs.ts');
     const extra = join(dir, 'src/extra.ts');
     const mainText = readFileSync(main, 'utf8');
 
@@ -958,22 +959,22 @@ test(
       steps.push(old);
     };
 
-    // An edit to the body of a file: that file is parsed, the file it imports and the libraries are taken.
+    // An edit to the body of a file: that file is parsed, the other files and the libraries are taken.
     const before = programAnswers(api, program, dir);
     write(main, mainText + "export const added: number = 'text';\n");
-    next({ [main]: false, [types]: true });
+    next({ [main]: false, [types]: true, [docs]: true });
     assert.ok(program.getSemanticDiagnostics(program.getSourceFile(main)).some((d) => d.code === 2322));
     assert.deepEqual(programAnswers(api, steps[0], dir), before);
     // An edit that imports a new file, which changes the program's structure: the other files are still taken.
     write(extra, 'export const extra = 1;\n');
     write(main, "import { extra } from './extra.js';\n" + mainText + 'extra;\n');
-    next({ [main]: false, [types]: true, [extra]: false });
+    next({ [main]: false, [types]: true, [docs]: true, [extra]: false });
     // An edit to a file that another imports: the importing file is taken, and checked against the new text.
     write(types, readFileSync(types, 'utf8').replace('readonly x: number;', 'readonly x: string;'));
-    next({ [main]: true, [types]: false, [extra]: true });
+    next({ [main]: true, [types]: false, [docs]: true, [extra]: true });
     assert.ok(program.getSemanticDiagnostics(program.getSourceFile(main)).length > 0);
     // No edit: every file is taken.
-    next({ [main]: true, [types]: true, [extra]: true });
+    next({ [main]: true, [types]: true, [docs]: true, [extra]: true });
 
     // The new program does not depend on the old ones, which are disposed of on their own.
     const answers = programAnswers(api, program, dir);
@@ -983,7 +984,7 @@ test(
     // createProgram takes them too, but not with other module detection options, under which a file parses differently
     // unless it is a declaration file.
     const options = program.getCompilerOptions();
-    const rootNames = [main, types, extra];
+    const rootNames = [docs, main, types, extra];
     const withOptions = api.createProgram({ rootNames, options, host: hostFor(dir), oldProgram: program });
     assert.ok(withOptions.getSourceFiles().every((file) => program.getSourceFile(file.fileName) === file));
     assert.deepEqual(programAnswers(api, withOptions, dir), answers);
@@ -991,7 +992,7 @@ test(
     const other = api.createProgram({ rootNames, options: detection, host: hostFor(dir), oldProgram: program });
     assert.deepEqual(
       taken(other, program, (file) => other.isSourceFileDefaultLibrary(file)),
-      { own: { [main]: false, [types]: false, [extra]: false }, libraries: true },
+      { own: { [main]: false, [types]: false, [docs]: false, [extra]: false }, libraries: true },
     );
     const scratch = api.createProgram({ rootNames, options: detection, host: hostFor(dir) });
     assert.deepEqual(programAnswers(api, other, dir), programAnswers(api, scratch, dir));
@@ -1297,6 +1298,99 @@ test('the type guards answer as the TypeScript functions of the same names', { s
   assert.deepEqual(failures.slice(0, 20), []);
   assert.ok(guards.length > 240, `${guards.length} guards`);
   assert.ok(compared > 2000, `${compared} nodes compared`);
+});
+
+test('getJSDocTags gives the tags TypeScript gives', { skip }, async () => {
+  const ts5 = (await import('typescript-5.9')).default;
+  const api = await load('library/index.js');
+  const { SyntaxKind } = api;
+  const names = namesOf(SyntaxKind);
+  const names5 = namesOf(ts5.SyntaxKind);
+  // A tag by name and start: TypeScript 7 ends a tag before the whitespace that follows it, TypeScript 5 after.
+  const describe = (tags) => tags.map((tag) => `@${tag.tagName.text} ${tag.pos}`).join(', ');
+  const parse = (name) => {
+    const fileName = join(root, 'tests/fixtures', name);
+    const text = readFileSync(fileName, 'utf8');
+    return {
+      file: api.parseSourceFile(fileName, text, { host: hostFor(root) }),
+      reference: ts5.createSourceFile(fileName, text, ts5.ScriptTarget.ESNext, true),
+    };
+  };
+
+  // Declarations and variable statements have the tags TypeScript 5 gives them. TypeScript 7 also gives the tags of
+  // a variable declaration or statement, a property, a return statement or an expression statement to every child of
+  // it (below), where TypeScript 5 gives them to a few of them, so other nodes are not compared.
+  const failures = [];
+  const kindsWithTags = new Set();
+  let compared = 0;
+  let tags = 0;
+  for (const name of [
+    'completions/src/members.ts',
+    'library/src/docs.ts',
+    'services/src/docs.ts',
+    'services/src/legacy.js',
+  ]) {
+    const { file, reference } = parse(name);
+    const nodes5 = new Map();
+    const visit = (node) => {
+      nodes5.set(`${names5.get(node.kind)} ${node.pos} ${node.end}`, node);
+      ts5.forEachChild(node, visit);
+    };
+    visit(reference);
+    api.walkPreorder(file, (node) => {
+      const node5 = nodes5.get(`${names.get(node.kind)} ${node.pos} ${node.end}`);
+      if (node5 === undefined || !(ts5.isDeclaration(node5) || ts5.isVariableStatement(node5))) return;
+      compared++;
+      const actual = api.getJSDocTags(node);
+      if (actual.length > 0) kindsWithTags.add(names.get(node.kind));
+      tags += actual.length;
+      if (describe(actual) !== describe(ts5.getJSDocTags(node5)))
+        failures.push(`${name} ${names.get(node.kind)} at ${node.pos}: ${describe(actual)}`);
+    });
+  }
+  assert.deepEqual(failures.slice(0, 20), []);
+  assert.ok(compared > 200 && tags > 90, `${compared} declarations compared, ${tags} tags`);
+  for (const kind of [
+    'ArrowFunction',
+    'ClassDeclaration',
+    'Constructor',
+    'EnumMember',
+    'FunctionDeclaration',
+    'MethodDeclaration',
+    'MethodSignature',
+    'ModuleDeclaration',
+    'Parameter',
+    'PropertyAssignment',
+    'PropertyDeclaration',
+    'PropertySignature',
+    'TypeParameter',
+    'VariableDeclaration',
+    'VariableStatement',
+  ])
+    assert.ok(kindsWithTags.has(kind), `tags of a ${kind}`);
+
+  // What TypeScript 7 gives the other nodes: the tags of the first node of a kind whose text starts with `text`.
+  const { file } = parse('library/src/docs.ts');
+  const tagsOf = (kind, text = '') => {
+    let found;
+    api.walkPreorder(file, (node) => {
+      if (node.kind !== kind || !api.getTextOfNode(node).startsWith(text)) return undefined;
+      found = api.getJSDocTags(node).map((tag) => tag.tagName.text);
+      return 'stop';
+    });
+    return found;
+  };
+  // The children of a documented statement or declaration.
+  assert.deepEqual(tagsOf(SyntaxKind.NumericLiteral, '42'), ['since']);
+  assert.deepEqual(tagsOf(SyntaxKind.Identifier, 'other'), ['internal']);
+  assert.deepEqual(tagsOf(SyntaxKind.CallExpression, 'add(answer, other)'), ['todo']);
+  assert.deepEqual(tagsOf(SyntaxKind.SatisfiesExpression), ['satisfies']);
+  // A function with two comments: the `@overload` of the first, then the tags of the last.
+  assert.deepEqual(tagsOf(SyntaxKind.FunctionDeclaration, 'export function join'), ['overload', 'param', 'param']);
+  assert.deepEqual(tagsOf(SyntaxKind.Parameter, '...rest'), ['param']);
+  // A `@type` on a parenthesized expression is the expression's, not the property's it initializes.
+  assert.deepEqual(tagsOf(SyntaxKind.ParenthesizedExpression, '(1)'), ['type', 'default']);
+  assert.deepEqual(tagsOf(SyntaxKind.ParenthesizedExpression, '(local)'), ['type']);
 });
 
 test('a program takes a file parse threads prepared only when the host gives the same text', { skip }, async () => {
